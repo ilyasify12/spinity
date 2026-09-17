@@ -30,6 +30,5 @@ const ListenSessionSchema = new Schema({
     endedAt: { type: Date, default: null }
 }, { timestamps: true });
 ListenSessionSchema.index({ hostId: 1 });
-ListenSessionSchema.index({ code: 1 });
 export const ListenSession = mongoose.model('ListenSession', ListenSessionSchema);
 //# sourceMappingURL=ListenSession.js.map

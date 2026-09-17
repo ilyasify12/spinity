@@ -38,7 +38,7 @@ const port = env.PORT
 async function start(): Promise<void> {
   await connectMongo()
   console.log('[mongo] connected')
-  httpServer.listen(port, () => console.log(`[server] listening on http://localhost:${port}`))
+  httpServer.listen(port, '0.0.0.0', () => console.log(`[server] listening on 0.0.0.0:${port} -> external http://node1.waifly.com:${port}`))
 }
 
 start().catch((err) => {
