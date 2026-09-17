@@ -1,6 +1,6 @@
 {
   "name": "spinity",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Local-first desktop music player with a personal library built from YouTube",
   "main": "./out/main/index.js",
   "author": "Spinity",
