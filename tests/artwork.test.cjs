@@ -1,0 +1,56 @@
+const {test}=require('node:test')
+const assert=require('node:assert/strict')
+const fs=require('node:fs'),os=require('node:os'),path=require('node:path')
+const {execFileSync}=require('node:child_process')
+const {buildSync}=require('esbuild')
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'spinity-art-'))
+const ffmpeg=path.join(process.env.LOCALAPPDATA,'Microsoft','WinGet','Links','ffmpeg.exe')
+process.env.SPINITY_FFMPEG=ffmpeg
+buildSync({entryPoints:[path.join(__dirname,'../src/main/artwork.ts')],bundle:true,platform:'node',format:'cjs',outfile:path.join(root,'art.cjs')})
+const {createArtworkLoader}=require(path.join(root,'art.cjs'))
+const cacheDir=path.join(root,'cache')
+const localArtwork=createArtworkLoader(cacheDir)
+function ff(args){execFileSync(ffmpeg,['-nostdin','-v','error','-y',...args],{timeout:20000,windowsHide:true})}
+const cover=path.join(root,'picture.png')
+ff(['-f','lavfi','-i','color=c=red:s=64x64','-frames:v','1',cover])
+const embedded=path.join(root,'embedded.mp3')
+ff(['-f','lavfi','-i','sine=frequency=440:duration=2','-i',cover,'-map','0:a','-map','1:v','-c:a','libmp3lame','-c:v','copy','-id3v2_version','3','-disposition:v','attached_pic',embedded])
+const plain=path.join(root,'plain.wav')
+ff(['-f','lavfi','-i','sine=frequency=880:duration=2',plain])
+const sideDir=path.join(root,'side');fs.mkdirSync(sideDir)
+const side=path.join(sideDir,'track.wav');fs.copyFileSync(plain,side)
+fs.copyFileSync(cover,path.join(sideDir,'Folder.PNG'))
+const before=fs.readFileSync(embedded)
+test('MP3 attached-picture metadata can be read without extracting it',()=>{
+ const ffprobe=ffmpeg.replace(/ffmpeg(\.exe)?$/i,'ffprobe$1')
+ const probe=JSON.parse(execFileSync(ffprobe,['-v','error','-show_streams','-of','json',embedded],{windowsHide:true,timeout:10000,maxBuffer:65536}).toString())
+ assert.ok(probe.streams?.some(s=>s.disposition?.attached_pic===1))
+})
+test('extracts embedded artwork and leaves source audio untouched',async()=>{
+ const image=await localArtwork(embedded)
+ assert.ok(image?.length>0);assert.equal(image.subarray(1,4).toString(),'PNG')
+ assert.deepEqual(fs.readFileSync(embedded),before)
+})
+test('never borrows folder art for a track without embedded art',async()=>{
+ assert.equal(await localArtwork(side),null)
+})
+test('no artwork returns null; missing audio returns null',async()=>{
+ assert.equal(await localArtwork(plain),null)
+ assert.equal(await localArtwork(path.join(root,'absent.mp3')),null)
+})
+test('deduplicates concurrent extraction and uses cache',async()=>{
+ const results=await Promise.all([localArtwork(embedded),localArtwork(embedded)])
+ assert.deepEqual(results[0],results[1])
+})
+test('positive and negative disk cache survive restart without launching tools',async()=>{
+ await localArtwork(embedded);await localArtwork(plain)
+ const program=`const cp=require('node:child_process');cp.execFile=()=>{throw new Error('Unexpected subprocess')};const assert=require('node:assert/strict');const {createArtworkLoader}=require(${JSON.stringify(path.join(root,'art.cjs'))});const load=createArtworkLoader(${JSON.stringify(cacheDir)});(async()=>{assert.ok((await load(${JSON.stringify(embedded)})).length);assert.equal(await load(${JSON.stringify(plain)}),null)})().catch(e=>{console.error(e);process.exit(1)})`
+ execFileSync(process.execPath,['-e',program],{timeout:10000})
+})
+test('file changes invalidate previously cached no-art result',async()=>{
+ const changed=path.join(root,'changed.mp3');fs.copyFileSync(plain,changed)
+ assert.equal(await localArtwork(changed),null)
+ fs.copyFileSync(embedded,changed)
+ assert.ok((await localArtwork(changed))?.length)
+})
+process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}))

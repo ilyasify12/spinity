@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+release/
+.vite/
+*.log
+.DS_Store
+.env
+server/.env
+server/dist/
+*.tsbuildinfo
+# stray nested copy
+spinity/
