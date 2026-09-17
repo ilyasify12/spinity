@@ -4,13 +4,8 @@
 #   npm run dist       full NSIS installer -> release/
 #   npm run dist:dir   unpacked folder, fastest way to sanity-check packaging
 #
-# AUTO-UPDATE — deliberately NOT enabled yet. It needs ALL of:
-#   1. the `electron-updater` runtime dependency added
-#   2. code signing: unsigned installers trigger SmartScreen, and a broken
-#      signature is worse than no updater
-#   3. a hosted feed matching the `publish` block (commented out below)
-# Adding the dependency without 2 and 3 ships an updater that can never
-# succeed, so it is left out until a feed exists.
+# AUTO-UPDATE — enabled via electron-updater + GitHub Releases.
+# Unsigned builds still trigger SmartScreen but updater works without signing.
 appId: com.spinity.app
 productName: Spinity
 
@@ -67,8 +62,8 @@ nsis:
   deleteAppDataOnUninstall: false
   uninstallDisplayName: Spinity
 
-# Uncomment and point at your own host to enable updates (see note above):
-# publish:
-#   - provider: generic
-#     url: https://your-update-server.example.com/spinity/
-#     channel: latest
+publish:
+  - provider: github
+    owner: ilyasify12
+    repo: spinity
+    private: false

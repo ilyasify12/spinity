@@ -2,6 +2,7 @@ import { app, BrowserWindow, protocol, shell } from 'electron'
 import path from 'node:path'
 import fs from 'node:fs'
 import { Readable } from 'node:stream'
+import { autoUpdater } from 'electron-updater'
 import { createArtworkLoader } from './artwork'
 import { db } from './db'
 import { registerIpc, restoreSession, setBroadcast, filePathForTrack, wireDownloads } from './ipc'
@@ -232,6 +233,21 @@ app.whenReady().then(() => {
   })
   wireDownloads()
   createWindow()
+
+  // Auto-updates via GitHub Releases (only in packaged builds)
+  if (app.isPackaged) {
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+
+    autoUpdater.on('checking-for-update', () => console.log('[updater] checking...'))
+    autoUpdater.on('update-available', (info) => console.log('[updater] available', info.version))
+    autoUpdater.on('update-downloaded', (info) => console.log('[updater] downloaded', info.version, '- will install on quit'))
+    autoUpdater.on('error', (err) => console.error('[updater] error', err))
+
+    setTimeout(() => {
+      void autoUpdater.checkForUpdatesAndNotify().catch((e) => console.error('[updater] check failed', e))
+    }, 3000)
+  }
 
   // Allow getUserMedia for voice calls (renderer). Without this the mic is denied.
   const ses = mainWindow?.webContents.session ?? null
