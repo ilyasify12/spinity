@@ -166,13 +166,13 @@ export function FriendsPage(): React.JSX.Element {
         <div className="friends-gate">
           <h2>Connect to Spinity online</h2>
           <p className="hint">Friends, chat, voice and listen party need an online account. Your local music stays on this PC.</p>
-          <div className="field"><label>Server URL</label><input value={serverUrl} onChange={e => setServerUrl(e.target.value)} placeholder="https://spinity-server.onrender.com" /></div>
+          <div className="field"><label>Server URL</label><input value={serverUrl} onChange={e => setServerUrl(e.target.value)} placeholder="http://node1.waifly.com:25386" /></div>
           <div className="field"><label>Username</label><input value={onlineUser} onChange={e => setOnlineUser(e.target.value)} placeholder="your handle" /></div>
           {isRegister && <div className="field"><label>Display name</label><input value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Shown to friends" /></div>}
           <div className="field"><label>Password</label><input type="password" value={onlinePass} onChange={e => setOnlinePass(e.target.value)} /></div>
           <button className="btn" onClick={() => void connectOnline()} disabled={busy}>{busy ? 'Please wait…' : isRegister ? 'Create online account' : 'Connect'}</button>
           <button className="btn btn-ghost" onClick={() => setIsRegister(v => !v)}>{isRegister ? 'Already have one? Sign in' : 'No account yet? Create one'}</button>
-          <p className="hint" style={{ marginTop: 8 }}>Hosted 24/7: <code>https://spinity-server.onrender.com</code> — change only for local dev (<code>http://localhost:3000</code>). STUN <code>stun:stun.l.google.com:19302</code> fallback.</p>
+          <p className="hint" style={{ marginTop: 8 }}>Hosted 24/7: <code>http://node1.waifly.com:25386</code> — change only for local dev (<code>http://localhost:3000</code>). STUN <code>stun:stun.l.google.com:19302</code> fallback.</p>
         </div>
       ) : (
         <>

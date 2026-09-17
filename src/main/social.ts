@@ -39,10 +39,17 @@ async function api<T>(path: string, opts: RequestInit & { token?: string } = {})
 
 export async function socialRegister(serverUrl: string, username: string, password: string, displayName?: string): Promise<ServerAccount> {
   const base = serverBase(serverUrl)
-  const res = await fetch(`${base}/api/auth/register`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password, displayName })
-  })
+  let res: Response
+  try {
+    res = await fetch(`${base}/api/auth/register`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, displayName })
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    // Common cause: Waifly container sleeping or wrong port
+    throw new Error(`Could not reach ${base} — ${msg}. Check Server URL is http://node1.waifly.com:25386 and server is running (GET ${base}/health should return {"ok":true})`)
+  }
   const body = await res.json().catch(() => ({})) as { error?: string; token?: string; user?: { id: string; username: string } }
   if (!res.ok) throw new Error(body.error ?? 'Registration failed')
   const acc: ServerAccount = { serverUserId: body.user!.id, username: body.user!.username, token: body.token!, serverUrl: base }
@@ -53,10 +60,16 @@ export async function socialRegister(serverUrl: string, username: string, passwo
 
 export async function socialLogin(serverUrl: string, username: string, password: string): Promise<ServerAccount> {
   const base = serverBase(serverUrl)
-  const res = await fetch(`${base}/api/auth/login`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password })
-  })
+  let res: Response
+  try {
+    res = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    throw new Error(`Could not reach ${base} — ${msg}. Check Server URL and that ${base}/health is reachable`)
+  }
   const body = await res.json().catch(() => ({})) as { error?: string; token?: string; user?: { id: string; username: string } }
   if (!res.ok) throw new Error(body.error ?? 'Login failed')
   const acc: ServerAccount = { serverUserId: body.user!.id, username: body.user!.username, token: body.token!, serverUrl: base }

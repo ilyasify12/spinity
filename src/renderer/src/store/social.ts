@@ -21,7 +21,7 @@ interface SocialState {
   remove: (friendId: string) => Promise<void>
 }
 
-const DEFAULT_URL = 'https://spinity-server.onrender.com'
+const DEFAULT_URL = 'http://node1.waifly.com:25386'
 
 export const useSocial = create<SocialState>((set, get) => ({
   serverUrl: (() => { try { return localStorage.getItem('spinity:serverUrl') ?? DEFAULT_URL } catch { return DEFAULT_URL } })(),
