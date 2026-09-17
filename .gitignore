@@ -1,13 +1,14 @@
 node_modules/
 out/
-dist/
+/out/
 release/
 .vite/
 *.log
 .DS_Store
 .env
 server/.env
-server/dist/
+!server/dist/
+!server/dist/**
 *.tsbuildinfo
 # stray nested copy
 spinity/
