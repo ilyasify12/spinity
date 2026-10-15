@@ -7,6 +7,7 @@ import { errorHandler } from './middleware/errorHandler.js'
 import authRoutes from './routes/auth.js'
 import friendsRoutes from './routes/friends.js'
 import messagesRoutes from './routes/messages.js'
+import imagesRoutes from './routes/images.js'
 import callsRoutes from './routes/calls.js'
 import partiesRoutes from './routes/parties.js'
 import { createSocketServer } from './socket/index.js'
@@ -14,7 +15,7 @@ import { createSocketServer } from './socket/index.js'
 const app = express()
 
 app.use(cors({ origin: env.CLIENT_URL === '*' ? true : env.CLIENT_URL.split(',').map(s => s.trim()), credentials: true }))
-app.use(express.json({ limit: '1mb' }))
+app.use(express.json({ limit: '8mb' }))
 
 app.get('/health', (_req, res) => res.json({ ok: true, version: '0.1.0' }))
 app.get('/api/health', (_req, res) => res.json({ ok: true }))
@@ -22,6 +23,7 @@ app.get('/api/health', (_req, res) => res.json({ ok: true }))
 app.use('/api/auth', authRoutes)
 app.use('/api/friends', friendsRoutes)
 app.use('/api/messages', messagesRoutes)
+app.use('/api/images', imagesRoutes)
 app.use('/api/calls', callsRoutes)
 app.use('/api/parties', partiesRoutes)
 

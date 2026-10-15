@@ -31,34 +31,90 @@ win:
         - x64
   icon: build/icon.ico
 
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  # build/icon.icns is generated from build/icon.png (see SETUP.md).
+  # Without it electron-builder falls back to the stock Electron icon.
+  icon: build/icon.icns
+  category: public.app-category.music
+  # Unsigned: distributed outside the App Store. Users open with
+  # right-click → Open on first launch (Gatekeeper).
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  artifactName: Spinity-${version}-${arch}.${ext}
+
 # Ship the logo with the installer so the packaged app can show it.
 extraResources:
   - from: logo.png
     to: logo.png
   - from: build/icon.png
     to: icon.png
+  # The phone web player: the zero-dependency server plus the PWA it serves.
+  # Plain files beside the asar, so the app can spawn the server from disk
+  # (Settings → Phone) with no system Node install.
+  - from: website
+    to: website
+    filter:
+      - '**/*'
+      - '!smoke-player.cjs'
 
 nsis:
+  # URL-safe file name (no spaces): the auto-updater downloads
+  # https://github.com/<owner>/<repo>/releases/download/v<version>/<this file>,
+  # so latest.yml and the asset name must match exactly.
+  artifactName: Spinity-Setup-${version}.${ext}
+
   # ONE-CLICK vs WIZARD: these are mutually exclusive.
-  #   oneClick: true  -> silent, single-button install, no directory choice
-  #   oneClick: false -> wizard (what is configured here)
-  oneClick: false
+  #   oneClick: true  -> single window, no wizard pages, no directory choice
+  #   oneClick: false -> wizard
+  # One click, one window. Windows already asks where an installer came from;
+  # the wizard made users answer a second round of questions about a directory
+  # they had no reason to care about, and every one of those pages is another
+  # place for the install to fail.
+  oneClick: true
 
   # PER-USER vs PER-MACHINE:
   #   perMachine: false -> installs to %LOCALAPPDATA%\Programs, no admin needed
   #   perMachine: true  -> installs to Program Files, requires elevation
-  # Per-user is the right default for a music app used by one person.
+  # Per-user is the right default for a music app used by one person, and it is
+  # also what keeps UAC out of the picture: RequestExecutionLevel stays "user"
+  # and the installer never elevates, so nothing can fail with "unable to
+  # elevate". The flip side is that a machine-wide install from an older build
+  # cannot be upgraded silently - build/installer.nsh detects that and says so.
   perMachine: false
 
-  allowToChangeInstallationDirectory: true
-  allowElevation: true
+  # No directory page and no "install for all users" page in one-click mode.
+  # Leaving these off also keeps $INSTDIR from being rewritten mid-install.
+  allowToChangeInstallationDirectory: false
 
-  # Shortcuts.
-  createDesktopShortcut: true
+  # Custom NSIS include: the dark branded install window (build/installer.nsh).
+  # This is the supported way to restyle an electron-builder NSIS installer.
+  include: build/installer.nsh
+
+  # Icons for the window and the taskbar banner shown while it installs.
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/installerHeaderIcon.ico
+
+  # Shortcuts. createDesktopShortcut accepts `always`, which recreates the icon
+  # on every install instead of leaving whatever was already there — so a
+  # shortcut that went missing, or still points at a removed folder, heals
+  # itself rather than leaving the app unlaunchable.
+  createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: Spinity
 
-  # Keep %APPDATA%\spinity on uninstall so the music library survives.
+  # Keep %APPDATA%\spinity on uninstall so the music library survives. It also
+  # means the auto-updater runs the old uninstaller with --updated, which is
+  # what lets it hand over to the new version without a reboot.
   deleteAppDataOnUninstall: false
   uninstallDisplayName: Spinity
 

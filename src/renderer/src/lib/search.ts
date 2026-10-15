@@ -21,13 +21,24 @@ import type { Track } from '@shared/types'
  * Accents are removed so "beyonce" and "beyoncé" match. Symbols are replaced
  * with spaces rather than deleted, so "AC/DC" normalises to "ac dc" and a
  * query for "ac" still matches.
+ *
+ * Arabic gets the same treatment its search analyser would: harakat/tatweel
+ * dropped, hamza carriers folded onto their base letters (أ/إ/آ → ا, ة → ه,
+ * ى → ي, standalone ء removed after NFKD split it off), so "أحمد" matches a
+ * query for "احمد". All other scripts survive via \p{L} — previously every
+ * non-Latin character was erased, which made Arabic queries match nothing.
  */
 export function normalizeText(input: string): string {
   return input
     .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u0300-\u036f]/g, '') // combining marks (latin accents)
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '') // arabic harakat + tatweel
+    .replace(/\u0621/g, '') // hamza left behind by NFKD (أ → ا + ء …)
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -124,12 +135,38 @@ function tokenMatches(haystack: string, needle: string): boolean {
 export function searchLibrary(tracks: Track[], query: string): Track[] {
   const q = normalizeText(query)
   if (!q) return tracks
+  return searchIndex(tracks.map(toIndexDocument), q, (id) => tracks.find((t) => t.id === id))
+}
 
-  const needles = q.split(' ').filter(Boolean)
+/** Prebuilt index: build once per library change, query many times per keystroke. */
+export interface LibraryIndex {
+  docs: IndexDocument[]
+  byId: Map<string, Track>
+}
+
+export function createLibraryIndex(tracks: Track[]): LibraryIndex {
+  return {
+    docs: tracks.map(toIndexDocument),
+    byId: new Map(tracks.map((t) => [t.id, t]))
+  }
+}
+
+/** Query a prebuilt index (no per-keystroke re-indexing). */
+export function searchIndexed(index: LibraryIndex, query: string): Track[] {
+  const q = typeof query === 'string' ? normalizeText(query) : ''
+  if (!q) return [...index.byId.values()]
+  return searchIndex(index.docs, q, (id) => index.byId.get(id))
+}
+
+function searchIndex(
+  docs: IndexDocument[],
+  normalizedQuery: string,
+  resolve: (id: string) => Track | undefined
+): Track[] {
+  const needles = normalizedQuery.split(' ').filter(Boolean)
 
   const scored: { track: Track; score: number }[] = []
-  for (const track of tracks) {
-    const doc = toIndexDocument(track)
+  for (const doc of docs) {
     const tokens = doc.searchable_text.split(' ').filter(Boolean)
 
     let total = 0
@@ -137,10 +174,9 @@ export function searchLibrary(tracks: Track[], query: string): Track[] {
     for (const needle of needles) {
       let best = 0
       for (const token of tokens) {
-        if (token === needle) best = Math.max(best, 3)
+        if (token === needle) { best = 3; break }
         else if (token.startsWith(needle)) best = Math.max(best, 2)
         else if (tokenMatches(token, needle)) best = Math.max(best, 1)
-        if (best === 3) break
       }
       if (best === 0) {
         allMatched = false
@@ -148,7 +184,10 @@ export function searchLibrary(tracks: Track[], query: string): Track[] {
       }
       total += best
     }
-    if (allMatched) scored.push({ track, score: total })
+    if (allMatched) {
+      const track = resolve(doc.id)
+      if (track) scored.push({ track, score: total })
+    }
   }
 
   scored.sort(

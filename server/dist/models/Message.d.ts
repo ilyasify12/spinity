@@ -7,7 +7,7 @@ declare const MessageSchema: mongoose.Schema<any, mongoose.Model<any, any, any, 
 }, {
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {
@@ -39,7 +39,7 @@ declare const MessageSchema: mongoose.Schema<any, mongoose.Model<any, any, any, 
 }, mongoose.Document<unknown, {}, mongoose.FlatRecord<{
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {
@@ -76,7 +76,7 @@ declare const MessageSchema: mongoose.Schema<any, mongoose.Model<any, any, any, 
 }>> & mongoose.FlatRecord<{
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {
@@ -116,7 +116,7 @@ export type MessageDoc = InferSchemaType<typeof MessageSchema> & {
 export declare const Message: mongoose.Model<{
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {
@@ -148,7 +148,7 @@ export declare const Message: mongoose.Model<{
 }, {}, {}, {}, mongoose.Document<unknown, {}, {
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {
@@ -185,7 +185,7 @@ export declare const Message: mongoose.Model<{
 }> & {
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {
@@ -226,7 +226,7 @@ export declare const Message: mongoose.Model<{
 }, {
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {
@@ -258,7 +258,7 @@ export declare const Message: mongoose.Model<{
 }, mongoose.Document<unknown, {}, mongoose.FlatRecord<{
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {
@@ -295,7 +295,7 @@ export declare const Message: mongoose.Model<{
 }>> & mongoose.FlatRecord<{
     conversationId: mongoose.Types.ObjectId;
     senderId: mongoose.Types.ObjectId;
-    kind: "text" | "playlist" | "track" | "system";
+    kind: "text" | "playlist" | "track" | "system" | "image";
     readBy: mongoose.Types.ObjectId[];
     body?: string | null | undefined;
     payload?: {

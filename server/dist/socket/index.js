@@ -2,11 +2,14 @@ import { Server } from 'socket.io';
 import { verifyToken } from '../utils/token.js';
 import { User } from '../models/User.js';
 import { ListenSession } from '../models/ListenSession.js';
+import { setIo } from './io.js';
+import { effectiveStatus } from '../routes/auth.js';
 function sortedPair(a, b) { return a < b ? [a, b] : [b, a]; }
 export function createSocketServer(httpServer, corsOrigin) {
     const io = new Server(httpServer, {
         cors: { origin: corsOrigin === '*' ? true : corsOrigin.split(',').map(s => s.trim()), methods: ['GET', 'POST'] }
     });
+    setIo(io);
     // Auth handshake
     io.use((socket, next) => {
         const token = socket.handshake.auth?.token ?? socket.handshake.query?.token;
@@ -26,8 +29,17 @@ export function createSocketServer(httpServer, corsOrigin) {
         const { userId } = socket.data;
         const userRoom = `user:${userId}`;
         void socket.join(userRoom);
-        void User.updateOne({ _id: userId }, { $set: { status: 'online', lastSeenAt: new Date() } });
-        socket.broadcast.emit('presence:update', { userId, status: 'online' });
+        // Auto-detect presence from the user's own choice: online → online,
+        // dnd → dnd, invisible → stays offline for everyone else.
+        void (async () => {
+            try {
+                const me = await User.findById(userId).select('statusPref').lean();
+                const status = effectiveStatus(me?.statusPref ?? 'online');
+                await User.updateOne({ _id: userId }, { $set: { status, lastSeenAt: new Date() } });
+                socket.broadcast.emit('presence:update', { userId, status });
+            }
+            catch { }
+        })();
         socket.on('presence:ping', () => {
             void User.updateOne({ _id: userId }, { $set: { lastSeenAt: new Date() } });
         });
@@ -73,15 +85,27 @@ export function createSocketServer(httpServer, corsOrigin) {
             io.to(`user:${data.toUserId}`).emit('call:signal', { from: userId, callId: data.callId, signal: data.signal });
         });
         // ---- listen party: relay host sync to participants
-        socket.on('party:join-room', (data) => {
+        socket.on('party:join-room', async (data) => {
             if (!data?.partyId)
                 return;
             void socket.join(`party:${data.partyId}`);
+            try {
+                const session = await ListenSession.findById(data.partyId);
+                if (session) {
+                    const ids = session.participants.map(p => String(p.userId));
+                    io.to(`party:${data.partyId}`).emit('party:members', { partyId: data.partyId, participants: ids });
+                    socket.emit('party:state', { partyId: data.partyId, playback: session.playback, at: Date.now() });
+                    socket.emit('party:queue', { partyId: data.partyId, queue: session.queue });
+                }
+            }
+            catch { }
+            socket.to(`party:${data.partyId}`).emit('party:member-joined', { partyId: data.partyId, userId });
         });
         socket.on('party:leave-room', (data) => {
             if (!data?.partyId)
                 return;
             void socket.leave(`party:${data.partyId}`);
+            socket.to(`party:${data.partyId}`).emit('party:member-left', { partyId: data.partyId, userId });
         });
         socket.on('party:sync', async (data) => {
             if (!data?.partyId || !data?.playback)
@@ -101,9 +125,21 @@ export function createSocketServer(httpServer, corsOrigin) {
             const session = await ListenSession.findById(data.partyId);
             if (!session || String(session.hostId) !== userId)
                 return;
-            if (data.queue.length > 100)
-                return;
-            session.queue = data.queue;
+            const clean = data.queue
+                .filter((t) => !!t && typeof t === 'object')
+                .map((t) => ({
+                videoId: String(t.videoId ?? ''),
+                title: String(t.title ?? 'Untitled'),
+                artist: String(t.artist ?? 'Unknown artist'),
+                durationSec: Number(t.durationSec ?? 0) || 0,
+                thumbnail: String(t.thumbnail ?? ''),
+                webUrl: String(t.webUrl ?? '')
+            }))
+                .filter((t) => !!t.videoId && !!t.webUrl)
+                .slice(0, 100);
+            if (data.queue.length > 0 && clean.length === 0)
+                return; // only local files — keep old queue
+            session.queue = clean;
             await session.save();
             io.to(`party:${data.partyId}`).emit('party:queue', { partyId: data.partyId, queue: session.queue });
         });

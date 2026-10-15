@@ -1,117 +1,340 @@
-import { useState, type FormEvent } from 'react'
+import { useDeferredValue, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useApp } from '../store/app'
+import { useCurrentTrack, usePlayer } from '../player/engine'
 import { TrackRow } from '../components/TrackRow'
-import { IconDownload, IconExternal, IconPlay } from '../components/Icons'
+import { openContextMenu, playlistSubmenu, type MenuItem } from '../components/ContextMenu'
+import { IconDownload, IconExternal, IconPause, IconPlay } from '../components/Icons'
+import { createLibraryIndex, searchIndexed } from '../lib/search'
+import { t } from '../lib/i18n'
+import type { SearchResult, Track } from '@shared/types'
 
 /**
- * YouTube search. Only metadata is fetched here (`--flat-playlist`), so this
- * is fast and downloads nothing until the user explicitly asks for a track.
+ * Default fill for the page: a silent YouTube search issued on mount so the
+ * page is never blank before the first query (local quick picks show
+ * immediately regardless).
+ */
+function popularQuery(): string {
+  return useApp.getState().settings.language === 'ar' ? 'أغاني شائعة' : 'popular music'
+}
+
+/**
+ * Search page: instant local matches while typing + debounced background
+ * YouTube search (silent — errors/emptiness only toast on explicit Enter).
+ *
+ * Three inputs share one view:
+ *   - `q`            live keystrokes (local state, pushed to the store debounced)
+ *   - `searchQuery`  committed query (TopBar submissions land here and refill
+ *                    the input when the user navigates to this page)
+ *   - `resultsQuery` which query `results` belongs to, so old results never
+ *                    flash under a newer query
  */
 export function SearchPage(): React.JSX.Element {
   const results = useApp((s) => s.results)
+  const resultsQuery = useApp((s) => s.resultsQuery)
   const searching = useApp((s) => s.searching)
+  const query = useApp((s) => s.searchQuery)
+  const setSearchQuery = useApp((s) => s.setSearchQuery)
   const search = useApp((s) => s.search)
+  const startingId = useApp((s) => s.startingId)
   const download = useApp((s) => s.download)
   const playFromSearch = useApp((s) => s.playFromSearch)
+  const downloadAndAddToPlaylist = useApp((s) => s.downloadAndAddToPlaylist)
+  const playlists = useApp((s) => s.playlists)
+  const likedIds = useApp((s) => s.likedIds)
+  const toggleLike = useApp((s) => s.toggleLike)
   const tracks = useApp((s) => s.tracks)
   const jobs = useApp((s) => s.jobs)
+  const notify = useApp((s) => s.notify)
 
-  const [query, setQuery] = useState('')
+  const [q, setQ] = useState(query)
+  const current = useCurrentTrack()
+  const playing = usePlayer((s) => s.playing)
+  const stop = usePlayer((s) => s.stop)
+  const defaultQ = useMemo(popularQuery, [])
 
-  const ownedIds = new Set(tracks.map((t) => t.id))
-  const pendingIds = new Set(
+  // TopBar commit → refill this input (and only then — typing must not fight
+  // the store).
+  const [committed, setCommitted] = useState(query)
+  useEffect(() => {
+    if (query !== committed) {
+      setCommitted(query)
+      setQ(query)
+    }
+  }, [query, committed])
+
+  // Default fill: while the input is empty, keep a (cached) popular search in
+  // `results` so the page has content.
+  useEffect(() => {
+    if (q.trim() !== '') return
+    if (searching || resultsQuery === defaultQ) return
+    void search(defaultQ, { silent: true })
+  }, [q, searching, resultsQuery, defaultQ, search])
+
+  // Background YouTube search as the user types (debounced, silent, cached).
+  useEffect(() => {
+    const trimmed = q.trim()
+    if (trimmed.length < 2 || trimmed === resultsQuery) return
+    const id = window.setTimeout(() => {
+      setCommitted(trimmed)
+      setSearchQuery(trimmed)
+      void search(trimmed, { silent: true })
+    }, 500)
+    return () => window.clearTimeout(id)
+  }, [q, resultsQuery, search, setSearchQuery])
+
+  const ownedIds = useMemo(() => new Set(tracks.map((track) => track.id)), [tracks])
+  const likedSet = useMemo(() => new Set(likedIds), [likedIds])
+  const pendingIds = useMemo(() => new Set(
     jobs
       .filter(
         (j) => j.status === 'queued' || j.status === 'downloading' || j.status === 'converting'
       )
       .map((j) => j.trackId)
-  )
+  ), [jobs])
+
+  // Local matches: deferred so a large fuzzy index never blocks keystrokes.
+  const index = useMemo(() => createLibraryIndex(tracks), [tracks])
+  const deferredQ = useDeferredValue(q)
+  const localMatches = useMemo(() => {
+    const needle = deferredQ.trim()
+    if (!needle) return []
+    return searchIndexed(index, needle).slice(0, 20)
+  }, [index, deferredQ])
+
+  // Quick picks (empty input only): likes first, then the newest additions.
+  const quickPicks = useMemo(() => {
+    const liked = likedIds
+      .map((id) => tracks.find((track) => track.id === id))
+      .filter((track): track is Track => Boolean(track))
+    const rest = tracks.filter((track) => !likedSet.has(track.id))
+    return [...liked, ...rest].slice(0, 6)
+  }, [tracks, likedIds, likedSet])
+
+  const trimmedQ = q.trim()
+  const hasQuery = trimmedQ !== ''
+  // True when `results` answers what's in the input right now.
+  const resultsLive = hasQuery && resultsQuery === trimmedQ
+  const trendingLive = !hasQuery && resultsQuery === defaultQ
+  const showSpinner = searching && (hasQuery ? resultsLive || resultsQuery === '' : trendingLive)
 
   function onSubmit(e: FormEvent): void {
     e.preventDefault()
-    void search(query)
+    const trimmed = q.trim()
+    if (!trimmed) return
+    setCommitted(trimmed)
+    setSearchQuery(trimmed)
+    void search(trimmed)
+  }
+
+  function playLocal(track: Track): void {
+    const idx = tracks.findIndex((tk) => tk.id === track.id)
+    if (idx >= 0) usePlayer.getState().playQueue(tracks, idx)
+  }
+
+  function renderResult(r: SearchResult, i: number): React.JSX.Element {
+    const owned = ownedIds.has(r.id)
+    const pending = pendingIds.has(r.id)
+    const starting = startingId === r.id
+    const isActive = current?.id === r.id && playing
+    const handlePlay = (): void => {
+      if (isActive) stop()
+      else void playFromSearch(r)
+    }
+    const menu = (e: React.MouseEvent): void => {
+      const items: MenuItem[] = [
+        { label: isActive ? t('ctx.stop', 'Stop') : t('ctx.play', 'Play'), onSelect: handlePlay },
+        ...(owned
+          ? []
+          : pending
+            ? [{ label: t('ctx.downloading', 'Downloading…'), disabled: true } as MenuItem]
+            : [{ label: t('ctx.saveToLibrary', 'Save to library'), onSelect: () => void download(r) } as MenuItem]),
+        playlistSubmenu(playlists, (pid) => void downloadAndAddToPlaylist(r, pid)),
+        { label: likedSet.has(r.id) ? t('ctx.unlike', 'Unlike') : t('ctx.like', 'Like'), onSelect: () => void toggleLike(r.id, r) },
+        { label: t('ctx.copyTitle', 'Copy title'), onSelect: () => void navigator.clipboard.writeText(`${r.title} — ${r.artist}`).then(() => notify(t('action.copied', 'Copied'))).catch(() => {}) },
+        { label: t('ctx.openYouTube', 'Open on YouTube'), onSelect: () => void window.open(r.webUrl, '_blank') }
+      ]
+      openContextMenu(e, items)
+    }
+    return (
+      <TrackRow
+        key={r.id}
+        index={i}
+        title={r.title}
+        artist={r.artist}
+        thumbnail={r.thumbnail}
+        durationSec={r.durationSec}
+        playing={isActive}
+        onPlay={handlePlay}
+        liked={likedSet.has(r.id)}
+        onToggleLike={() => void toggleLike(r.id, r)}
+        onContextMenu={menu}
+        actions={
+          <>
+            <button
+              className={`btn btn-sm${isActive ? ' btn-danger' : ''}`}
+              onClick={handlePlay}
+              title={
+                isActive
+                  ? t('search.tipStop', 'Stop playback')
+                  : owned
+                    ? t('search.tipLocal', 'Play from your library (offline)')
+                    : t('search.tipStream', 'Stream now — downloads automatically if streaming fails')
+              }
+            >
+              {isActive ? <IconPause size={13} /> : <IconPlay size={13} />} {isActive ? t('ctx.stop', 'Stop') : t('ctx.play', 'Play')}
+            </button>
+            {starting ? (
+              <span className="chip">{t('search.starting', 'starting…')}</span>
+            ) : owned ? (
+              <span className="chip chip-ok">{t('search.inLibrary', 'in library')}</span>
+            ) : pending ? (
+              <span className="chip">{t('search.downloadingChip', 'downloading…')}</span>
+            ) : (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => void download(r)}
+                title={t('search.tipDownload', 'Download to library')}
+              >
+                <IconDownload size={13} /> {t('action.save', 'Save')}
+              </button>
+            )}
+            {playlists.length > 0 && (
+              <select
+                className="btn btn-ghost btn-sm"
+                value=""
+                title={owned ? t('search.tipAdd', 'Add to playlist') : t('search.tipAddSave', 'Save to library + add to playlist')}
+                onChange={(e) => {
+                  if (e.target.value) void downloadAndAddToPlaylist(r, e.target.value)
+                  e.target.value = ''
+                }}
+              >
+                <option value="">{t('search.addOption', '+ playlist')}</option>
+                {playlists.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            )}
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => void window.open(r.webUrl, '_blank')}
+              title={t('ctx.openYouTube', 'Open on YouTube')}
+            >
+              <IconExternal size={13} />
+            </button>
+          </>
+        }
+      />
+    )
   }
 
   return (
     <>
-      <h1 className="page-title">Search</h1>
-      <p className="page-sub">Find music on YouTube, then save it to your local library.</p>
+      <h1 className="page-title">{t('page.search', 'Search')}</h1>
+      <p className="page-sub">{t('search.sub', 'Find music on YouTube, then save it to your local library.')}</p>
 
       <form className="searchbar" onSubmit={onSubmit}>
         <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search YouTube — artists, songs, albums, mixes…"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder={t('search.placeholder', 'Search YouTube — artists, songs, albums, mixes…')}
           autoFocus
-          aria-label="Search query"
+          aria-label={t('search.queryAria', 'Search query')}
         />
-        <button className="btn" type="submit" disabled={searching || query.trim() === ''}>
-          {searching ? 'Searching…' : 'Search'}
+        <button className="btn" type="submit" disabled={searching || trimmedQ === ''}>
+          {searching ? t('search.searching', 'Searching…') : t('search.searchBtn', 'Search')}
         </button>
       </form>
 
-      {searching && <div className="empty">Searching YouTube…</div>}
-
-      {!searching && results.length === 0 && (
-        <div className="empty">
-          {query.trim() === ''
-            ? 'Search for something to get started.'
-            : 'No results. Try different keywords.'}
-        </div>
+      {!hasQuery && quickPicks.length > 0 && (
+        <section style={{ marginBottom: 24 }}>
+          <div className="sp-section-head">
+            <h2>{t('search.quickPicks', 'Quick picks')}</h2>
+          </div>
+          <div className="track-list">
+            {quickPicks.map((track, i) => {
+              const isActive = current?.id === track.id && playing
+              return (
+                <TrackRow
+                  key={track.id}
+                  index={i}
+                  title={track.title}
+                  artist={track.artist}
+                  thumbnail={track.thumbnail}
+                  durationSec={track.durationSec}
+                  playing={isActive}
+                  onPlay={() => { if (isActive) stop(); else playLocal(track) }}
+                  liked={likedSet.has(track.id)}
+                  onToggleLike={() => void toggleLike(track.id)}
+                  actions={
+                    <button className="btn btn-sm" onClick={() => { if (isActive) stop(); else playLocal(track) }}>
+                      {isActive ? <IconPause size={13} /> : <IconPlay size={13} />} {isActive ? t('ctx.stop', 'Stop') : t('ctx.play', 'Play')}
+                    </button>
+                  }
+                />
+              )
+            })}
+          </div>
+        </section>
       )}
 
-      {!searching && results.length > 0 && (
-        <div className="track-list">
-          {results.map((r, i) => {
-            const owned = ownedIds.has(r.id)
-            const pending = pendingIds.has(r.id)
-            return (
-              <TrackRow
-                key={r.id}
-                index={i}
-                title={r.title}
-                artist={r.artist}
-                thumbnail={r.thumbnail}
-                durationSec={r.durationSec}
-                onPlay={() => void playFromSearch(r)}
-                actions={
-                  <>
-                    <button
-                      className="btn btn-sm"
-                      onClick={() => void playFromSearch(r)}
-                      title={
-                        owned
-                          ? 'Play from your library (offline)'
-                          : 'Stream now — downloads automatically if streaming fails'
-                      }
-                    >
-                      <IconPlay size={13} /> Play
+      {hasQuery && localMatches.length > 0 && (
+        <section style={{ marginBottom: 24 }}>
+          <div className="sp-section-head">
+            <h2>{t('search.fromLibrary', 'From your library')}</h2>
+          </div>
+          <div className="track-list">
+            {localMatches.map((track, i) => {
+              const isActive = current?.id === track.id && playing
+              return (
+                <TrackRow
+                  key={track.id}
+                  index={i}
+                  title={track.title}
+                  artist={track.artist}
+                  thumbnail={track.thumbnail}
+                  durationSec={track.durationSec}
+                  playing={isActive}
+                  onPlay={() => { if (isActive) stop(); else playLocal(track) }}
+                  liked={likedSet.has(track.id)}
+                  onToggleLike={() => void toggleLike(track.id)}
+                  actions={
+                    <button className="btn btn-sm" onClick={() => { if (isActive) stop(); else playLocal(track) }}>
+                      {isActive ? <IconPause size={13} /> : <IconPlay size={13} />} {isActive ? t('ctx.stop', 'Stop') : t('ctx.play', 'Play')}
                     </button>
-                    {owned ? (
-                      <span className="chip chip-ok">in library</span>
-                    ) : pending ? (
-                      <span className="chip">downloading…</span>
-                    ) : (
-                      <button
-                        className="btn btn-ghost btn-sm"
-                        onClick={() => void download(r)}
-                        title="Download to library"
-                      >
-                        <IconDownload size={13} /> Save
-                      </button>
-                    )}
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => void window.open(r.webUrl, '_blank')}
-                      title="Open on YouTube"
-                    >
-                      <IconExternal size={13} />
-                    </button>
-                  </>
-                }
-              />
-            )
-          })}
+                  }
+                />
+              )
+            })}
+          </div>
+        </section>
+      )}
+
+      {(trendingLive || resultsLive) && (
+        <section>
+          <div className="sp-section-head">
+            <h2>{hasQuery ? t('search.youtubeResults', 'YouTube results') : t('search.trending', 'Trending')}</h2>
+          </div>
+          {results.length > 0 && <div className="track-list">{results.map(renderResult)}</div>}
+          {showSpinner && results.length === 0 && <div className="empty">{t('search.lookingUp', 'Searching YouTube…')}</div>}
+          {!searching && results.length === 0 && (
+            <div className="empty">
+              {hasQuery
+                ? t('search.noResults', 'No results. Try different keywords.')
+                : t('search.emptyDefault', 'Search for something to get started.')}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* First load: no results settled yet (spinner for the default fill). */}
+      {!hasQuery && !trendingLive && !quickPicks.length && searching && (
+        <div className="empty">{t('search.lookingUp', 'Searching YouTube…')}</div>
+      )}
+      {hasQuery && !resultsLive && !localMatches.length && (
+        <div className="empty">
+          {q.trim().length >= 2
+            ? t('search.lookingUp', 'Searching YouTube…')
+            : t('search.keepTyping', 'Keep typing to search…')}
         </div>
       )}
     </>

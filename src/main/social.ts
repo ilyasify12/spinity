@@ -7,6 +7,18 @@ interface ServerAccount {
   serverUrl: string
 }
 
+/** 1.0: one cloud backend — no per-user server URL anymore. */
+export const CLOUD_URL = 'http://node1.waifly.com:25386'
+
+/** Our own effective presence, mirrored for DND suppression of popups. */
+let selfStatus = 'online'
+export function setSelfStatus(status: string): void {
+  selfStatus = status
+}
+export function getSelfStatus(): string {
+  return selfStatus
+}
+
 type SocialEvent = { type: string; payload: unknown }
 
 let socket: Socket | null = null
@@ -37,23 +49,24 @@ async function api<T>(path: string, opts: RequestInit & { token?: string } = {})
   return body as T
 }
 
-export async function socialRegister(serverUrl: string, username: string, password: string, displayName?: string): Promise<ServerAccount> {
+export async function socialRegister(serverUrl: string, username: string, password: string, displayName?: string, email?: string): Promise<ServerAccount> {
   const base = serverBase(serverUrl)
   let res: Response
   try {
     res = await fetch(`${base}/api/auth/register`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, displayName })
+      body: JSON.stringify({ username, password, displayName, email })
     })
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
     // Common cause: Waifly container sleeping or wrong port
     throw new Error(`Could not reach ${base} — ${msg}. Check Server URL is http://node1.waifly.com:25386 and server is running (GET ${base}/health should return {"ok":true})`)
   }
-  const body = await res.json().catch(() => ({})) as { error?: string; token?: string; user?: { id: string; username: string } }
+  const body = await res.json().catch(() => ({})) as { error?: string; token?: string; user?: { id: string; username: string; status?: string } }
   if (!res.ok) throw new Error(body.error ?? 'Registration failed')
   const acc: ServerAccount = { serverUserId: body.user!.id, username: body.user!.username, token: body.token!, serverUrl: base }
   account = acc
+  if (body.user?.status) setSelfStatus(body.user.status)
   connectSocket()
   return acc
 }
@@ -70,10 +83,11 @@ export async function socialLogin(serverUrl: string, username: string, password:
     const msg = e instanceof Error ? e.message : String(e)
     throw new Error(`Could not reach ${base} — ${msg}. Check Server URL and that ${base}/health is reachable`)
   }
-  const body = await res.json().catch(() => ({})) as { error?: string; token?: string; user?: { id: string; username: string } }
+  const body = await res.json().catch(() => ({})) as { error?: string; token?: string; user?: { id: string; username: string; status?: string } }
   if (!res.ok) throw new Error(body.error ?? 'Login failed')
   const acc: ServerAccount = { serverUserId: body.user!.id, username: body.user!.username, token: body.token!, serverUrl: base }
   account = acc
+  if (body.user?.status) setSelfStatus(body.user.status)
   connectSocket()
   return acc
 }
@@ -91,6 +105,8 @@ export function connectSocket(): void {
   socket.on('connect_error', (err) => broadcast('evt:social', { type: 'social:error', payload: { message: err.message } }))
 
   socket.on('presence:update', forward('presence:update'))
+  socket.on('chat:message', forward('chat:message'))
+  socket.on('chat:deleted', forward('chat:deleted'))
   socket.on('chat:typing', forward('chat:typing'))
   socket.on('call:incoming', forward('call:incoming'))
   socket.on('call:accepted', forward('call:accepted'))
@@ -99,6 +115,9 @@ export function connectSocket(): void {
   socket.on('call:signal', forward('call:signal'))
   socket.on('party:state', forward('party:state'))
   socket.on('party:queue', forward('party:queue'))
+  socket.on('party:members', forward('party:members'))
+  socket.on('party:member-joined', forward('party:member-joined'))
+  socket.on('party:member-left', forward('party:member-left'))
   // Friends updates are delivered via REST polling today; also listen if server emits them
   socket.on('friend:request', forward('friend:request'))
   socket.on('friend:updated', forward('friend:updated'))
@@ -116,7 +135,9 @@ export function getSocket(): Socket | null { return socket }
 
 // REST helpers that require an active account
 export const socialApi = {
-  me: () => api<{ id: string; username: string; displayName: string }>(`/api/auth/me`),
+  me: () => api<{ id: string; username: string; displayName: string; email?: string | null; status?: string; statusPref?: string }>(`/api/auth/me`),
+  updateProfile: (displayName: string) => api<{ id: string; displayName: string }>(`/api/auth/profile`, { method: 'PATCH', body: JSON.stringify({ displayName }) }),
+  setStatus: (status: 'online' | 'dnd' | 'invisible') => api<{ status: string; statusPref: string }>(`/api/auth/status`, { method: 'POST', body: JSON.stringify({ status }) }),
   search: (q: string) => api<{ id: string; username: string; displayName: string; avatarUrl?: string | null; status?: string }[]>(`/api/friends/search?q=${encodeURIComponent(q)}`),
   request: (toUserId: string, message?: string) => api<{ id: string }>(`/api/friends/request`, { method: 'POST', body: JSON.stringify({ toUserId, message }) }),
   respond: (requestId: string, accept: boolean) => api<{ status: string }>(`/api/friends/respond`, { method: 'POST', body: JSON.stringify({ requestId, accept }) }),
@@ -129,10 +150,14 @@ export const socialApi = {
   conversations: () => api<unknown[]>(`/api/messages/conversations`),
   messages: (conversationId: string, limit = 50) => api<unknown[]>(`/api/messages/${encodeURIComponent(conversationId)}?limit=${limit}`),
   send: (payload: { toUserId?: string; conversationId?: string; kind: string; body?: string | null; payload?: unknown }) => api<unknown>(`/api/messages/send`, { method: 'POST', body: JSON.stringify(payload) }),
+  deleteMessage: (messageId: string) => api<{ ok: boolean; conversationId: string; messageId: string }>(`/api/messages/${encodeURIComponent(messageId)}`, { method: 'DELETE' }),
   read: (conversationId: string) => api<{ ok: boolean }>(`/api/messages/${encodeURIComponent(conversationId)}/read`, { method: 'POST' }),
+  uploadImage: (payload: { toUserId?: string; conversationId?: string; dataUrl: string }) => api<{ imageId: string; conversationId: string; expiresAt: string }>(`/api/images`, { method: 'POST', body: JSON.stringify(payload) }),
+  pinImage: (imageId: string, pinned: boolean) => api<{ imageId: string; pinned: boolean; expiresAt: string | null }>(`/api/images/${encodeURIComponent(imageId)}`, { method: 'PATCH', body: JSON.stringify({ pinned }) }),
   ice: () => api<{ iceServers: { urls: string | string[]; username?: string; credential?: string }[] }>(`/api/calls/ice`),
   partyCreate: (queue?: unknown[]) => api<{ id: string; code: string }>(`/api/parties/create`, { method: 'POST', body: JSON.stringify({ queue: queue ?? [] }) }),
   partyJoin: (code: string) => api<{ id: string; code: string }>(`/api/parties/join`, { method: 'POST', body: JSON.stringify({ code }) }),
   partyGet: (id: string) => api<unknown>(`/api/parties/${encodeURIComponent(id)}`),
+  partyActive: () => api<{ party: unknown | null }>(`/api/parties/my/active`),
   partyLeave: (id: string) => api<{ ok: boolean; ended?: boolean }>(`/api/parties/${encodeURIComponent(id)}/leave`, { method: 'POST' })
 }

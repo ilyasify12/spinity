@@ -30,6 +30,34 @@ Try searching for **Big Buck Bunny** first. It is Creative Commons licensed,
 so it is a safe way to confirm the whole download-and-play pipeline works
 before you rely on it for anything else.
 
+## On your phone (same Wi-Fi)
+
+The phone player streams the library straight from this PC — no copying files.
+
+1. On the PC, open a terminal in the Spinity folder and run:
+
+   ```powershell
+   node website/web-server.cjs
+   ```
+
+2. It prints a link like `http://192.168.1.21:8901/player`. Type that address
+   in your phone's browser (Chrome on Android), or tap **Add to Home screen**
+   in the browser menu to get a Spinity icon on your phone.
+
+3. Log in with your desktop account or create a separate one — the phone
+   player keeps its own accounts in `%APPDATA%\spinity\web-users.json`.
+
+On the phone you get the full player: browse and stream your library, search
+YouTube and tap **Save** (the file is downloaded to this PC with yt-dlp),
+likes and playlists, lyrics, and a **download icon** in the now-playing sheet
+to save a track onto the phone itself. Keep the terminal window open while
+you listen; the phone needs this PC turned on and on the same Wi-Fi.
+
+Two things that need `https://` (or the future Android app) rather than a
+plain `http://` LAN address: installing it as a real app (Add to Home screen
+still works, but as a browser shortcut) and the richer lockscreen controls.
+Music still keeps playing with the screen off either way.
+
 ## Requirements
 
 | Requirement | Status on this PC |

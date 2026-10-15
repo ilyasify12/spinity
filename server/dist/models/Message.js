@@ -10,7 +10,7 @@ const SharedTrackSchema = new Schema({
 const MessageSchema = new Schema({
     conversationId: { type: Schema.Types.ObjectId, ref: 'Conversation', required: true, index: true },
     senderId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
-    kind: { type: String, enum: ['text', 'playlist', 'track', 'system'], default: 'text', required: true },
+    kind: { type: String, enum: ['text', 'playlist', 'track', 'system', 'image'], default: 'text', required: true },
     body: { type: String, maxlength: 4000, default: null },
     payload: {
         type: {

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spinity — Your music. Your library. Your rules.</title>
+<meta name="description" content="Spinity is a local-first music player for desktop and web. Build a library from YouTube, play local files, make playlists — and take it anywhere in the browser." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  :root {
+    --bg:#08080b; --panel:rgba(20,20,27,.62); --line:rgba(255,255,255,.08);
+    --text:#f4f4f6; --dim:#a9a9b2; --ember:#ff6a2b; --ember2:#ff9a3d;
+    --violet:#7c5cff; --mint:#2ee6a8; --radius:20px; --max:1140px;
+  }
+  html { scroll-behavior:smooth; }
+  body { background:var(--bg); color:var(--text); font-family:'Plus Jakarta Sans',system-ui,sans-serif; line-height:1.6; -webkit-font-smoothing:antialiased; overflow-x:hidden; }
+  /* aurora background */
+  .aurora { position:fixed; inset:0; z-index:-2; overflow:hidden; }
+  .blob { position:absolute; border-radius:50%; filter:blur(110px); opacity:.5; animation:drift 22s ease-in-out infinite alternate; }
+  .b1 { width:520px; height:520px; background:#ff6a2b; top:-160px; left:-120px; }
+  .b2 { width:460px; height:460px; background:#7c5cff; top:20%; right:-160px; animation-delay:-8s; }
+  .b3 { width:420px; height:420px; background:#0e9f6e; bottom:-180px; left:32%; animation-delay:-14s; opacity:.35; }
+  @keyframes drift { from { transform:translate(0,0) scale(1); } to { transform:translate(70px,50px) scale(1.12); } }
+  .grain { position:fixed; inset:0; z-index:-1; opacity:.05; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='.9'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.6'/%3E%3C/svg%3E"); }
+  .wrap { max-width:var(--max); margin:0 auto; padding:0 24px; }
+  nav { position:fixed; top:0; left:0; width:100%; z-index:100; background:rgba(8,8,11,.72); backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); border-bottom:1px solid var(--line); }
+  .nav-inner { max-width:var(--max); margin:0 auto; padding:16px 24px; display:flex; align-items:center; gap:26px; }
+  .logo { display:flex; align-items:center; gap:10px; font-weight:800; font-size:19px; color:var(--text); text-decoration:none; }
+  .logo-dot { width:34px; height:34px; border-radius:12px; background:linear-gradient(135deg,var(--ember),var(--ember2)); display:grid; place-items:center; color:#1c0d03; font-weight:800; box-shadow:0 4px 22px rgba(255,106,43,.45); }
+  nav .links { margin-left:auto; display:flex; gap:22px; align-items:center; }
+  nav .links a:not(.btn) { color:var(--dim); font-size:14px; font-weight:600; text-decoration:none; }
+  nav .links a:not(.btn):hover { color:var(--text); }
+  .btn { display:inline-flex; align-items:center; gap:10px; background:linear-gradient(135deg,var(--ember),var(--ember2)); color:#1c0d03; font-weight:800; font-size:14px; padding:12px 26px; border-radius:999px; border:0; cursor:pointer; text-decoration:none; transition:transform .22s,box-shadow .22s; box-shadow:0 6px 26px rgba(255,106,43,.35); }
+  .btn:hover { transform:translateY(-2px); box-shadow:0 10px 32px rgba(255,106,43,.5); }
+  .btn.ghost { background:rgba(255,255,255,.05); color:var(--text); border:1px solid var(--line); box-shadow:none; }
+  .btn.ghost:hover { border-color:rgba(255,255,255,.3); background:rgba(255,255,255,.09); }
+  header { padding:168px 0 90px; text-align:center; }
+  .pill { display:inline-flex; align-items:center; gap:8px; font-size:13px; font-weight:700; color:var(--ember2); background:rgba(255,106,43,.1); border:1px solid rgba(255,106,43,.32); padding:7px 18px; border-radius:999px; margin-bottom:26px; }
+  .pulse { width:8px; height:8px; border-radius:50%; background:var(--mint); animation:pl 1.6s infinite; }
+  @keyframes pl { 50% { opacity:.35; } }
+  h1 { font-size:clamp(42px,7vw,76px); line-height:1.04; letter-spacing:-2.5px; font-weight:800; }
+  h1 .grad { background:linear-gradient(92deg,var(--ember2),var(--ember) 40%,var(--violet)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  .sub { max-width:640px; margin:22px auto 38px; color:var(--dim); font-size:18px; }
+  .cta-row { display:flex; gap:14px; justify-content:center; flex-wrap:wrap; }
+  .version-note { margin-top:18px; color:var(--dim); font-size:13px; }
+  .mock { margin:70px auto 0; max-width:920px; background:var(--panel); border:1px solid var(--line); border-radius:24px; backdrop-filter:blur(24px); -webkit-backdrop-filter:blur(24px); overflow:hidden; box-shadow:0 40px 100px -30px rgba(0,0,0,.9); text-align:left; }
+  .mock-bar { display:flex; gap:8px; padding:14px 18px; border-bottom:1px solid var(--line); }
+  .mock-bar i { width:11px; height:11px; border-radius:50%; background:#3a3a42; display:block; }
+  .mock-bar i:first-child { background:var(--ember); }
+  .mock-body { display:flex; min-height:340px; }
+  .mock-side { width:210px; border-right:1px solid var(--line); padding:20px 14px; display:flex; flex-direction:column; gap:6px; }
+  .mock-nav { font-size:13px; font-weight:700; color:var(--dim); padding:9px 12px; border-radius:9px; }
+  .mock-nav.on { color:var(--text); background:rgba(255,255,255,.07); }
+  .mock-main { flex:1; padding:24px 26px; }
+  .mock-cards { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; margin:16px 0 20px; }
+  .mock-card { background:rgba(255,255,255,.05); border-radius:12px; padding:12px; }
+  .mock-art { aspect-ratio:1; border-radius:8px; margin-bottom:8px; }
+  .mock-line { height:9px; border-radius:99px; background:rgba(255,255,255,.14); margin-top:7px; }
+  .mock-line.short { width:60%; }
+  .mock-row { display:flex; align-items:center; gap:12px; padding:9px 4px; border-top:1px solid rgba(255,255,255,.06); font-size:13px; }
+  .mock-row .dot { width:32px; height:32px; border-radius:7px; flex:none; }
+  section { padding:84px 0; }
+  .sec-head { text-align:center; margin-bottom:54px; }
+  .sec-head h2 { font-size:clamp(28px,4.5vw,40px); letter-spacing:-1px; font-weight:800; }
+  .sec-head p { color:var(--dim); max-width:560px; margin:12px auto 0; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:30px 26px; backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); transition:transform .3s,border-color .3s,box-shadow .3s; }
+  .card:hover { transform:translateY(-6px); border-color:rgba(255,106,43,.45); box-shadow:0 24px 60px -20px rgba(255,106,43,.25); }
+  .card .ico { width:50px; height:50px; border-radius:14px; display:grid; place-items:center; font-size:22px; background:rgba(255,106,43,.12); border:1px solid rgba(255,106,43,.25); margin-bottom:18px; }
+  .card h3 { font-size:17px; margin-bottom:8px; }
+  .card p { color:var(--dim); font-size:14px; }
+  .steps { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:20px; counter-reset:step; }
+  .step { background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:32px 26px; backdrop-filter:blur(18px); }
+  .step::before { counter-increment:step; content:counter(step); display:grid; place-items:center; width:38px; height:38px; border-radius:12px; background:linear-gradient(135deg,var(--ember),var(--violet)); font-weight:800; margin-bottom:16px; }
+  .step h3 { margin-bottom:8px; }
+  .step p { color:var(--dim); font-size:14px; }
+  .log { max-width:760px; margin:0 auto; }
+  .ver { border-left:2px solid rgba(255,106,43,.4); padding:4px 0 32px 30px; position:relative; }
+  .ver::before { content:""; position:absolute; left:-7px; top:12px; width:12px; height:12px; border-radius:50%; background:var(--ember); box-shadow:0 0 0 6px rgba(255,106,43,.14); }
+  .ver h3 { font-size:18px; }
+  .ver .tag { color:var(--ember2); background:rgba(255,106,43,.12); border:1px solid rgba(255,106,43,.3); padding:2px 10px; border-radius:6px; font-size:11px; margin-left:10px; }
+  .ver ul { margin:12px 0 0 18px; color:var(--dim); font-size:14px; }
+  .ver li { margin:7px 0; }
+  .ver li strong { color:var(--text); }
+  .cta-band { background:linear-gradient(135deg,rgba(255,106,43,.14),rgba(124,92,255,.16)); border:1px solid var(--line); border-radius:28px; text-align:center; padding:68px 34px; backdrop-filter:blur(20px); }
+  .cta-band h2 { font-size:clamp(26px,4vw,36px); letter-spacing:-1px; }
+  .cta-band p { color:var(--dim); margin:12px auto 28px; max-width:500px; }
+  footer { border-top:1px solid var(--line); padding:44px 0; color:var(--dim); font-size:13px; }
+  .foot-inner { max-width:var(--max); margin:0 auto; padding:0 24px; display:flex; justify-content:space-between; gap:14px; flex-wrap:wrap; }
+  .foot-inner a { color:var(--dim); text-decoration:none; }
+  .foot-inner a:hover { color:var(--text); }
+  @media (max-width:760px) { nav .links a:not(.btn) { display:none; } header { padding:130px 0 70px; } .mock-cards { grid-template-columns:repeat(2,1fr); } .mock-side { display:none; } }
+</style>
+</head>
+<body>
+<div class="aurora"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div></div>
+<div class="grain"></div>
+
+<nav><div class="nav-inner">
+  <a class="logo" href="#top"><span class="logo-dot">S</span>Spinity</a>
+  <div class="links">
+    <a href="#features">Features</a>
+    <a href="#how">How it works</a>
+    <a href="#changelog">Changelog</a>
+    <a class="btn ghost" href="/player">Open web player</a>
+    <a class="btn" href="https://github.com/ilyasify12/spinity/releases/latest" target="_blank" rel="noopener">Download</a>
+  </div>
+</div></nav>
+
+<header id="top"><div class="wrap">
+  <span class="pill"><span class="pulse"></span>v1.1.7 — desktop app &amp; web player</span>
+  <h1>Your music.<br /><span class="grad">Everywhere you are.</span></h1>
+  <p class="sub">Spinity builds a personal library from YouTube, plays your local files, and now follows you into the browser — same account, same likes, same playlists.</p>
+  <div class="cta-row">
+    <a class="btn" href="/player">▶ Open the web player</a>
+    <a class="btn ghost" href="https://github.com/ilyasify12/spinity/releases/latest" target="_blank" rel="noopener">⬇ Download for desktop</a>
+  </div>
+  <p class="version-note">Free · Local-first · No subscription, ever</p>
+
+  <div class="mock">
+    <div class="mock-bar"><i></i><i></i><i></i></div>
+    <div class="mock-body">
+      <div class="mock-side">
+        <div class="mock-nav on">⌂&nbsp; Home</div>
+        <div class="mock-nav">🔍&nbsp; Search</div>
+        <div class="mock-nav">💚&nbsp; Liked Songs</div>
+        <div class="mock-nav">▤&nbsp; Roadtrip</div>
+        <div class="mock-nav">▤&nbsp; Night drive</div>
+      </div>
+      <div class="mock-main">
+        <div style="font-weight:800;font-size:20px">Good evening. Wind it down.</div>
+        <div class="mock-cards">
+          <div class="mock-card"><div class="mock-art" style="background:linear-gradient(135deg,#ff6a2b,#ff9a3d)"></div><div class="mock-line"></div><div class="mock-line short"></div></div>
+          <div class="mock-card"><div class="mock-art" style="background:linear-gradient(135deg,#7c5cff,#3d8bff)"></div><div class="mock-line"></div><div class="mock-line short"></div></div>
+          <div class="mock-card"><div class="mock-art" style="background:linear-gradient(135deg,#2ee6a8,#0e9f6e)"></div><div class="mock-line"></div><div class="mock-line short"></div></div>
+          <div class="mock-card"><div class="mock-art" style="background:linear-gradient(135deg,#ff4d6d,#ff9a3d)"></div><div class="mock-line"></div><div class="mock-line short"></div></div>
+        </div>
+        <div class="mock-row"><span class="dot" style="background:linear-gradient(135deg,#ff6a2b,#7c5cff)"></span><span style="flex:1"><b>Alone</b> <span style="color:var(--dim)">— Alan Walker</span></span><span style="color:var(--dim)">2:44</span></div>
+        <div class="mock-row"><span class="dot" style="background:linear-gradient(135deg,#2ee6a8,#3d8bff)"></span><span style="flex:1"><b>Centuries</b> <span style="color:var(--dim)">— Fall Out Boy</span></span><span style="color:var(--dim)">3:48</span></div>
+        <div class="mock-row"><span class="dot" style="background:linear-gradient(135deg,#ff9a3d,#ff4d6d)"></span><span style="flex:1"><b>Nightcall</b> <span style="color:var(--dim)">— Kavinsky</span></span><span style="color:var(--dim)">4:13</span></div>
+      </div>
+    </div>
+  </div>
+</div></header>
+
+<section id="features"><div class="wrap">
+  <div class="sec-head"><h2>Everything a music player should be</h2><p>One library, two homes — the desktop app and the browser stay in sync.</p></div>
+  <div class="grid">
+    <div class="card"><div class="ico">🔍</div><h3>Search &amp; save</h3><p>Search YouTube from the web player and save tracks straight to the library — no desktop needed.</p></div>
+    <div class="card"><div class="ico">👤</div><h3>One account</h3><p>Log in with your desktop credentials. Likes and playlists follow you between app and browser.</p></div>
+    <div class="card"><div class="ico">💚</div><h3>Liked Songs &amp; playlists</h3><p>Heart anything, build playlists, and browse them from the sidebar wherever you listen.</p></div>
+    <div class="card"><div class="ico">📁</div><h3>Local files, honored</h3><p>Music folders indexed on your PC stream to the browser with artwork intact.</p></div>
+    <div class="card"><div class="ico">⚡</div><h3>Instant switching</h3><p>Next-track preloading and gapless-feel playback, on desktop and web alike.</p></div>
+    <div class="card"><div class="ico">🔒</div><h3>Local-first</h3><p>Your files never leave your computer except to your own browser. No cloud, no subscription.</p></div>
+  </div>
+</div></section>
+
+<section id="how"><div class="wrap">
+  <div class="sec-head"><h2>Up and running in three steps</h2></div>
+  <div class="steps">
+    <div class="step"><h3>Run the server</h3><p>Launch the desktop app once, or start the web server — your library is already there.</p></div>
+    <div class="step"><h3>Open the player</h3><p>Hit “Open the web player”, log in, and your songs, likes and playlists load instantly.</p></div>
+    <div class="step"><h3>Press play</h3><p>Search something new, save it, and keep listening from any device on the same link.</p></div>
+  </div>
+</div></section>
+
+<section id="changelog"><div class="wrap">
+  <div class="sec-head"><h2>Changelog</h2><p>Recent releases — Spinity ships often.</p></div>
+  <div class="log">
+    <div class="ver"><h3>1.1.7 <span class="tag">latest</span></h3><ul>
+      <li><strong>FX removed</strong> — plain playback, nothing to misconfigure.</li>
+      <li><strong>Mini-player behaves</strong> — announcements hide after 3s, stays out of the taskbar.</li>
+      <li><strong>Web player + accounts</strong> — login, likes and playlists in the browser.</li>
+    </ul></div>
+    <div class="ver"><h3>1.1.6</h3><ul>
+      <li><strong>Instant switching</strong> — next-track preloading, millisecond advances.</li>
+      <li><strong>Sharp local covers</strong> — embedded art at 512px instead of 128px.</li>
+    </ul></div>
+    <div class="ver"><h3>1.1.5</h3><ul>
+      <li><strong>Back to 1.0.1 sound</strong> — proven stream resolution, plain loads by default.</li>
+    </ul></div>
+  </div>
+</div></section>
+
+<section><div class="wrap"><div class="cta-band">
+  <h2>Ready to spin?</h2>
+  <p>Your library is already waiting. Open it in the browser or grab the desktop app.</p>
+  <div class="cta-row"><a class="btn" href="/player">▶ Open the web player</a>
+  <a class="btn ghost" href="https://github.com/ilyasify12/spinity/releases/latest" target="_blank" rel="noopener">⬇ Download for desktop</a></div>
+</div></div></section>
+
+<footer><div class="foot-inner">
+  <span>© 2026 Spinity · MIT License</span>
+  <span><a href="/player">Web player</a> · <a href="https://github.com/ilyasify12/spinity" target="_blank" rel="noopener">GitHub</a> · <a href="https://github.com/ilyasify12/spinity/releases" target="_blank" rel="noopener">Releases</a></span>
+</div></footer>
+</body>
+</html>

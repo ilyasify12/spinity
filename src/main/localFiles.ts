@@ -3,6 +3,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { db } from './db'
+import { resolveFfprobe } from './ytdlp'
+import { artworkUrl } from '../shared/thumbs'
 import type { Track } from '../shared/types'
 
 /**
@@ -37,20 +39,6 @@ function parseName(filePath: string): { title: string; artist: string } {
   }
   const parent = path.basename(path.dirname(filePath)).replace(/_+/g, ' ').trim()
   return { artist: parent || 'Unknown artist', title: base || 'Untitled' }
-}
-
-/** ffprobe sits next to ffmpeg; reuse the same discovery logic. */
-function resolveFfprobe(): string | null {
-  const home = process.env.USERPROFILE ?? ''
-  const local = process.env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local')
-  const candidates = [
-    process.env.SPINITY_FFMPEG
-      ? process.env.SPINITY_FFMPEG.replace(/ffmpeg(\.exe)?$/i, 'ffprobe$1')
-      : '',
-    path.join(local, 'Microsoft', 'WinGet', 'Links', 'ffprobe.exe'),
-    path.join(local, 'Programs', 'ffmpeg', 'bin', 'ffprobe.exe')
-  ].filter(Boolean)
-  return candidates.find((p) => fs.existsSync(p)) ?? null
 }
 
 /** Read the real duration with ffprobe so the seek bar and list are accurate. */
@@ -114,7 +102,7 @@ export function indexFolder(userId: string, root: string): Track[] {
       artist,
       // Kept from the previous scan when ffprobe already measured it.
       durationSec: previous?.durationSec ?? 0,
-      thumbnail: `spinity://artwork/${encodeURIComponent(id)}`,
+      thumbnail: artworkUrl(id),
       webUrl: '',
       filePath,
       downloadedAt: Date.now()

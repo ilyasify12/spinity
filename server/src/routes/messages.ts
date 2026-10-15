@@ -3,7 +3,9 @@ import { body, query, validationResult } from 'express-validator'
 import mongoose from 'mongoose'
 import { Conversation } from '../models/Conversation.js'
 import { Message } from '../models/Message.js'
+import { User } from '../models/User.js'
 import { Friendship } from '../models/Friendship.js'
+import { getIo } from '../socket/io.js'
 import { asyncHandler } from '../utils/asyncHandler.js'
 import { requireAuth, type AuthRequest } from '../middleware/auth.js'
 
@@ -59,14 +61,15 @@ router.get('/:conversationId', query('limit').optional().isInt({ min: 1, max: 10
 }))
 
 // POST /api/messages/send { toUserId?, conversationId?, kind, body?, payload? }
-router.post('/send', body('kind').isIn(['text', 'playlist', 'track']), body('body').optional().isString().isLength({ max: 4000 }), asyncHandler(async (req: AuthRequest, res) => {
+router.post('/send', body('kind').isIn(['text', 'playlist', 'track', 'image']), body('body').optional().isString().isLength({ max: 4000 }), asyncHandler(async (req: AuthRequest, res) => {
   if (handleValidation(req, res)) return
-  const kind = String(req.body.kind) as 'text' | 'playlist' | 'track'
+  const kind = String(req.body.kind) as 'text' | 'playlist' | 'track' | 'image'
   const bodyText = req.body.body ? String(req.body.body).trim().slice(0, 4000) : null
   const payload = req.body.payload ?? null
 
   if (kind === 'text' && !bodyText) { res.status(400).json({ error: 'Message body required' }); return }
   if ((kind === 'playlist' || kind === 'track') && !payload) { res.status(400).json({ error: 'Payload required for share' }); return }
+  if (kind === 'image' && !payload?.imageId) { res.status(400).json({ error: 'Upload the image first' }); return }
   if (payload?.tracks && (!Array.isArray(payload.tracks) || payload.tracks.length > 100)) { res.status(400).json({ error: 'Too many tracks (max 100)' }); return }
 
   let conversationId = req.body.conversationId ? String(req.body.conversationId) : null
@@ -86,10 +89,32 @@ router.post('/send', body('kind').isIn(['text', 'playlist', 'track']), body('bod
     conversationId: conv._id, senderId: req.userId, kind,
     body: bodyText, payload: payload ?? null, readBy: [req.userId]
   })
-  const preview = kind === 'text' ? (bodyText ?? '') : kind === 'playlist' ? `🎵 Playlist: ${payload?.name ?? 'shared'}` : `🎵 Track shared`
+  const preview = kind === 'text' ? (bodyText ?? '') : kind === 'playlist' ? `🎵 Playlist: ${payload?.name ?? 'shared'}` : kind === 'image' ? `📷 Photo` : `🎵 Track shared`
   conv.lastMessageAt = new Date(); conv.lastMessagePreview = preview.slice(0, 120); await conv.save()
 
-  res.json({ id: String(msg._id), conversationId: String(conv._id), senderId: req.userId, kind, body: bodyText, payload, createdAt: msg.createdAt })
+  const view = {
+    id: String(msg._id), conversationId: String(conv._id), senderId: req.userId,
+    kind, body: bodyText, payload, createdAt: msg.createdAt
+  }
+
+  // Realtime delivery: push the message to the other participant's socket so
+  // it arrives instantly instead of waiting for their next poll/refresh.
+  // Old clients ignore unknown events, so this is backwards compatible.
+  try {
+    const otherId = conv.participants.map(String).find(p => p !== req.userId)
+    if (otherId) {
+      const sender = await User.findById(req.userId).select('displayName username').lean()
+      getIo()?.to(`user:${otherId}`).emit('chat:message', {
+        ...view,
+        senderName: sender ? (sender.displayName || sender.username) : null
+      })
+    }
+  } catch {
+    // Delivery is best-effort: the message is saved, the recipient's next
+    // refresh still picks it up even if the push fails.
+  }
+
+  res.json(view)
 }))
 
 router.post('/:conversationId/read', asyncHandler(async (req: AuthRequest, res) => {
@@ -97,6 +122,25 @@ router.post('/:conversationId/read', asyncHandler(async (req: AuthRequest, res) 
   if (!conv || !conv.participants.map(String).includes(req.userId!)) { res.status(404).json({ error: 'Conversation not found' }); return }
   await Message.updateMany({ conversationId: conv._id, readBy: { $ne: new mongoose.Types.ObjectId(req.userId) } }, { $addToSet: { readBy: new mongoose.Types.ObjectId(req.userId) } })
   res.json({ ok: true })
+}))
+
+// DELETE /api/messages/:messageId — sender-only. The recipient's open chat
+// removes the row live via the `chat:deleted` push below.
+router.delete('/:messageId', asyncHandler(async (req: AuthRequest, res) => {
+  const msg = await Message.findById(req.params.messageId)
+  if (!msg) { res.status(404).json({ error: 'Message not found' }); return }
+  if (String(msg.senderId) !== req.userId) { res.status(403).json({ error: 'Only the sender can delete this message' }); return }
+  const conversationId = String(msg.conversationId)
+  const messageId = String(msg._id)
+  await msg.deleteOne()
+  try {
+    const conv = await Conversation.findById(msg.conversationId)
+    const otherId = conv?.participants.map(String).find(p => p !== req.userId)
+    if (otherId) getIo()?.to(`user:${otherId}`).emit('chat:deleted', { conversationId, messageId })
+  } catch {
+    // Best-effort: the row is gone; the recipient's next refresh converges.
+  }
+  res.json({ ok: true, conversationId, messageId })
 }))
 
 export default router

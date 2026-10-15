@@ -29,16 +29,21 @@ export const env = {
     }
     return s
   },
-  get JWT_EXPIRES_IN(): string { return process.env.JWT_EXPIRES_IN ?? '7d' },
+  get JWT_EXPIRES_IN(): string { return process.env.JWT_EXPIRES_IN ?? '90d' },
   get CLIENT_URL(): string { return process.env.CLIENT_URL ?? 'http://localhost:5173' },
   get STUN_SERVERS(): { urls: string }[] {
     const raw = process.env.STUN_SERVERS
-    if (!raw) return [{ urls: 'stun:stun.l.google.com:19302' }]
+    const defaults = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' }
+    ]
+    if (!raw) return defaults
     try {
       const parsed = JSON.parse(raw) as { urls: string }[]
       if (Array.isArray(parsed) && parsed.length) return parsed
     } catch {}
-    return [{ urls: 'stun:stun.l.google.com:19302' }]
+    return defaults
   },
   get TURN_URL(): string | null { return process.env.TURN_URL ?? null },
   get TURN_USERNAME(): string | null { return process.env.TURN_USERNAME ?? null },

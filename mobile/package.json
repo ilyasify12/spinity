@@ -1,0 +1,18 @@
+{
+  "name": "spinity-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Spinity for Android - Capacitor shell around the Spinity web player",
+  "scripts": {
+    "sync": "cap sync android",
+    "apk": "cap sync android && cd android && gradlew.bat assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/filesystem": "^8.1.5"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.5.3"
+  }
+}

@@ -4,8 +4,19 @@ import fs from 'node:fs'
 import { Readable } from 'node:stream'
 import { autoUpdater } from 'electron-updater'
 import { createArtworkLoader } from './artwork'
+import { createCoverLookup } from './coverArt'
+import { initArtworkWarmer, warmArtwork } from './artworkWarm'
+import { migrateLyricsCache } from './lyrics'
+import { IPC } from '../shared/ipc'
+import { artworkTrackId } from '../shared/thumbs'
 import { db } from './db'
-import { registerIpc, restoreSession, setBroadcast, filePathForTrack, wireDownloads } from './ipc'
+import { getSocialAccount } from './social'
+import { applyLoginItem } from './startup'
+import { shutdownPresence } from './presence'
+import { initNotifier, notifyForSocialEvent } from './notify'
+import { initMini, closeMiniWindow } from './mini'
+import { registerIpc, restoreSession, setBroadcast, filePathForTrack, trackForId, wireDownloads, currentUserSnapshot } from './ipc'
+import { stopPhoneServer } from './phoneServer'
 
 /**
  * A privileged custom scheme is registered BEFORE app ready.
@@ -44,11 +55,28 @@ const MIME: Record<string, string> = {
   '.opus': 'audio/ogg',
   '.webm': 'audio/webm',
   '.mp4': 'video/mp4',
-  '.png': 'image/png'
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp'
 }
 
 function mimeFor(filePath: string): string {
   return MIME[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream'
+}
+
+/** Sniff an image's real type, so the response Content-Type is truthful. */
+function imageMime(image: Uint8Array): string {
+  if (image[0] === 0xff && image[1] === 0xd8) return 'image/jpeg' // JPEG SOI
+  if (image[0] === 0x89 && image[1] === 0x50) return 'image/png' // \x89PNG
+  if (
+    image[0] === 0x52 && image[1] === 0x49 && image[2] === 0x46 && image[3] === 0x46 &&
+    image[8] === 0x57 && image[9] === 0x45 && image[10] === 0x42 && image[11] === 0x50
+  ) {
+    return 'image/webp' // RIFF....WEBP
+  }
+  return 'image/jpeg'
 }
 
 /**
@@ -78,6 +106,10 @@ function createWindow(): void {
       ? path.join(process.resourcesPath, 'icon.png')
       : path.join(app.getAppPath(), 'build', 'icon.png'),
     autoHideMenuBar: true,
+    // Frameless: the renderer draws its own top bar (logo drag region,
+    // search, window controls). Native Alt+F4 / snapping still work.
+    frame: false,
+    titleBarStyle: 'hidden',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -90,6 +122,11 @@ function createWindow(): void {
 
   // Avoid a white flash on launch.
   mainWindow.on('ready-to-show', () => mainWindow?.show())
+
+  // Tell the custom top bar when maximize state changes (Win+arrows, drag
+  // to top, taskbar). The renderer swaps maximize/restore glyphs on this.
+  mainWindow.on('maximize', () => mainWindow?.webContents.send('evt:maximize-changed', { maximized: true }))
+  mainWindow.on('unmaximize', () => mainWindow?.webContents.send('evt:maximize-changed', { maximized: false }))
 
   // Never let the app itself become a browser: hand external links to the OS.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -110,10 +147,66 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  if (process.platform === 'win32') app.setAppUserModelId('com.spinity.app')
+  if (process.platform === 'win32') {
+    // Windows silently drops any toast whose AppUserModelID has no Start Menu
+    // shortcut behind it. electron-builder writes `appId` into the installed
+    // shortcuts, so the packaged app claims `com.spinity.app`; in dev there is
+    // no shortcut for that id, so use the exe path — the exact value Electron's
+    // dev bootstrap expects (pin electron.exe to the Start Menu once).
+    app.setAppUserModelId(app.isPackaged ? 'com.spinity.app' : process.execPath)
+  }
   // spinity://audio/<trackId> -> the signed-in user's file for that track.
   let logoPath: string | null = null
-  const localArtwork = createArtworkLoader(path.join(app.getPath('userData'), 'artwork-cache-v2'))
+  const localArtwork = createArtworkLoader(path.join(app.getPath('userData'), 'artwork-cache-v3'))
+  // Thumbnails borrowed from YouTube for local files with no embedded cover.
+  const coverFallback = createCoverLookup(path.join(app.getPath('userData'), 'cover-cache-v2'))
+
+  /**
+   * Artwork responses already resolved for this session, keyed by track id.
+   *
+   * Two wins over extracting on every request: a repeat tile costs one `stat`
+   * instead of an ffprobe/ffmpeg round trip, and — because the response now
+   * carries an ETag and a real `max-age` — Chromium serves it from its own
+   * cache without touching the main process at all.
+   */
+  const artworkMemo = new Map<string, { tag: string; body: Uint8Array; type: string; stamp: string }>()
+  const MAX_ARTWORK_MEMO = 400
+  /** Long enough that navigating around never re-requests, short enough to self-heal. */
+  const ARTWORK_CACHE = 'private, max-age=600'
+
+  function rememberArtwork(
+    id: string,
+    entry: { tag: string; body: Uint8Array; type: string; stamp: string }
+  ): Response {
+    artworkMemo.delete(id)
+    artworkMemo.set(id, entry)
+    while (artworkMemo.size > MAX_ARTWORK_MEMO) {
+      const oldest = artworkMemo.keys().next().value
+      if (oldest === undefined) break
+      artworkMemo.delete(oldest)
+    }
+    return new Response(entry.body, {
+      headers: { 'Content-Type': entry.type, 'Cache-Control': ARTWORK_CACHE, ETag: entry.tag }
+    })
+  }
+
+  /** File revision the memo was built from; changes when the audio file does. */
+  function fileStamp(stat: fs.Stats): string {
+    return `${stat.size}-${Math.round(stat.mtimeMs)}`
+  }
+
+  /** Tell the renderer a borrowed cover landed so its tile can ask again. */
+  function notifyArtworkReady(trackId: string): void {
+    try {
+      mainWindow?.webContents.send(IPC.evtArtworkReady, { trackId })
+    } catch {}
+  }
+
+  initArtworkWarmer({
+    localArtwork,
+    cover: coverFallback,
+    onCover: notifyArtworkReady
+  })
 
   protocol.handle('spinity', async (request) => {
     try {
@@ -130,15 +223,112 @@ app.whenReady().then(() => {
       }
 
       if (url.hostname === 'artwork') {
-        const id = decodeURIComponent(url.pathname.replace(/^\//, ''))
+        const id = artworkTrackId(url.href)
+        if (!id) return new Response(null, { status: 404 })
         const file = filePathForTrack(id)
         if (!file) return new Response(null, { status: 404 })
-        const image = await localArtwork(file)
-        if (!image) return new Response(null, { status: 404 })
-        const mime = image[0] === 0xff && image[1] === 0xd8 ? 'image/jpeg' : 'image/png'
-        return new Response(new Uint8Array(image), {
-          headers: { 'Content-Type': mime, 'Cache-Control': 'no-store' }
-        })
+
+        const stat = await fs.promises.stat(file).catch(() => null)
+        if (!stat?.isFile()) return new Response(null, { status: 404 })
+        const stamp = fileStamp(stat)
+
+        const memo = artworkMemo.get(id)
+        if (memo && memo.stamp === stamp) {
+          // Served from memory: no ffprobe, no ffmpeg, no yt-dlp. The ETag lets
+          // the renderer cache treat it as fresh once max-age lapses.
+          return new Response(memo.body, {
+            headers: { 'Content-Type': memo.type, 'Cache-Control': ARTWORK_CACHE, ETag: memo.tag }
+          })
+        }
+
+        const art = await localArtwork(file)
+        if (art.image) {
+          const body = new Uint8Array(art.image)
+          return rememberArtwork(id, {
+            tag: `"e-${stamp}"`,
+            body,
+            type: imageMime(art.image),
+            stamp
+          })
+        }
+
+        // The probe ran and this file carries no picture at all. Files ripped
+        // from disk rarely carry one, so borrow the matching YouTube thumbnail
+        // instead of leaving the tile blank. A meaningless name ("1",
+        // "Track 03") yields null and keeps the default icon rather than
+        // stamping an unrelated picture on the song.
+        if (art.embedded === false) {
+          const track = trackForId(id)
+          if (track?.source === 'local') {
+            const known = await coverFallback.ready(track.title, track.artist)
+            if (known.state === 'hit') {
+              const body = new Uint8Array(known.image)
+              return rememberArtwork(id, {
+                tag: `"c-${stamp}-${body.length}"`,
+                body,
+                type: imageMime(known.image),
+                stamp
+              })
+            }
+            // Never searched before: answer the tile NOW with a placeholder and
+            // do the lookup in the background. Blocking here was what made a
+            // folder of local files take tens of seconds to show covers — every
+            // request queued behind two yt-dlp searches. The renderer refreshes
+            // this one tile when evt:artwork-ready arrives.
+            if (known.state === 'unknown') {
+              void coverFallback
+                .warm(track.title, track.artist)
+                .then((cover) => {
+                  if (cover) notifyArtworkReady(id)
+                })
+                .catch(() => {})
+            }
+          }
+        }
+        // Either the cover search is still running, or the probe could not run
+        // at all (tools missing/unreachable file). Borrowing art on a guess is
+        // what put wrong thumbnails on local files, so the tile shows the
+        // placeholder instead. no-store: "I do not know yet" must never be
+        // cached as "no artwork", or the tile would go stale forever.
+        return new Response(null, { status: 404, headers: { 'Cache-Control': 'no-store' } })
+      }
+
+      // Profile picture uploaded in the top-bar profile menu.
+      // spinity://avatar/<localUserId> -> that account's avatar file.
+      if (url.hostname === 'avatar') {
+        const userId = decodeURIComponent(url.pathname.replace(/^\//, ''))
+        const file = db.getAvatarPath(userId)
+        if (!file || !fs.existsSync(file)) return new Response(null, { status: 404 })
+        return new Response(
+          Readable.toWeb(fs.createReadStream(file)) as unknown as ReadableStream,
+          { headers: { 'Content-Type': mimeFor(file), 'Cache-Control': 'no-store' } }
+        )
+      }
+
+      // Chat image attachment: spinity://image/<imageId> -> authed server bytes.
+      // Keeps the Authorization token in main (the renderer never sees it).
+      if (url.hostname === 'image') {
+        const imageId = decodeURIComponent(url.pathname.replace(/^\//, ''))
+        if (!/^[a-f0-9]{24}$/i.test(imageId)) return new Response(null, { status: 404 })
+        const acc = getSocialAccount() ?? (currentUserSnapshot() ? db.getServerAccount(currentUserSnapshot()!.id) : null)
+        if (!acc) return new Response(null, { status: 401 })
+        try {
+          const res = await fetch(`${acc.serverUrl.replace(/\/$/, '')}/api/images/${imageId}`, {
+            headers: { Authorization: `Bearer ${acc.token}` }
+          })
+          if (res.status === 410) return new Response(null, { status: 410 })
+          if (!res.ok) return new Response(null, { status: res.status })
+          const buf = Buffer.from(await res.arrayBuffer())
+          return new Response(new Uint8Array(buf), {
+            headers: {
+              'Content-Type': res.headers.get('content-type') ?? 'image/png',
+              'Cache-Control': 'private, max-age=3600'
+            }
+          })
+        } catch (err) {
+          console.error('[protocol] image fetch failed', err)
+          return new Response(null, { status: 502 })
+        }
       }
 
       if (url.hostname !== 'audio') {
@@ -203,7 +393,10 @@ app.whenReady().then(() => {
         'Content-Type': mimeFor(filePath),
         'Accept-Ranges': 'bytes',
         'Content-Length': String(end - start + 1),
-        'Cache-Control': 'no-store'
+        'Cache-Control': 'no-store',
+        // Lets the renderer's WebAudio graph (DSP/reverb) tap this audio.
+        // Without it MediaElementSource outputs silence.
+        'Access-Control-Allow-Origin': '*'
       }
       if (partial) headers['Content-Range'] = `bytes ${start}-${end}/${total}`
 
@@ -227,25 +420,74 @@ app.whenReady().then(() => {
   // Reopen the last-used account before the renderer asks, so `auth:current`
   // already returns it on first query.
   const restored = restoreSession()
-  if (restored) console.log('[auth] restored session for', restored.username)
+  if (restored) {
+    console.log('[auth] restored session for', restored.username)
+    // Re-warm artwork for the restored library at low priority, so opening the
+    // app straight into a local folder does not pay extraction costs per tile.
+    try {
+      warmArtwork(db.getTracks(restored.id).filter((track) => track.source === 'local'))
+    } catch {}
+    // Retire lyrics matched by an older matcher (user uploads are kept).
+    try {
+      const retired = migrateLyricsCache()
+      if (retired > 0) console.log('[lyrics] retired', retired, 'auto-fetched lyric entr(ies) for a re-match')
+    } catch {}
+  }
   setBroadcast((channel, payload) => {
     mainWindow?.webContents.send(channel, payload)
+    // Desktop notifications for chat/calls/party invites, evaluated in main
+    // so they fire even when the Friends page isn't mounted.
+    if (channel === 'evt:social' && payload && typeof payload === 'object') {
+      const evt = payload as { type?: string; payload?: unknown }
+      if (typeof evt.type === 'string') notifyForSocialEvent(evt.type, evt.payload)
+    }
   })
+  initNotifier({
+    getWindow: () => mainWindow,
+    send: (channel, payload) => {
+      mainWindow?.webContents.send(channel, payload)
+    }
+  })
+  applyLoginItem()
   wireDownloads()
   createWindow()
+  initMini(mainWindow)
 
   // Auto-updates via GitHub Releases (only in packaged builds)
+  // Events are forwarded to renderer via evtUpdater so Settings can show Check for updates
+  const updaterBroadcast = (payload: { type: string; data?: unknown }): void => {
+    mainWindow?.webContents.send('evt:updater', payload)
+  }
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.on('checking-for-update', () => {
+    console.log('[updater] checking...')
+    updaterBroadcast({ type: 'checking' })
+  })
+  autoUpdater.on('update-available', (info) => {
+    console.log('[updater] available', info.version)
+    updaterBroadcast({ type: 'available', data: { version: info.version } })
+  })
+  autoUpdater.on('update-not-available', (info) => {
+    console.log('[updater] not-available', info.version)
+    updaterBroadcast({ type: 'not-available', data: { version: info.version } })
+  })
+  autoUpdater.on('download-progress', (p) => {
+    updaterBroadcast({ type: 'progress', data: { percent: p.percent, transferred: p.transferred, total: p.total } })
+  })
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('[updater] downloaded', info.version, '- will install on quit')
+    updaterBroadcast({ type: 'downloaded', data: { version: info.version } })
+  })
+  autoUpdater.on('error', (err) => {
+    console.error('[updater] error', err)
+    updaterBroadcast({ type: 'error', data: { message: err?.message ?? String(err) } })
+  })
   if (app.isPackaged) {
-    autoUpdater.autoDownload = true
-    autoUpdater.autoInstallOnAppQuit = true
-
-    autoUpdater.on('checking-for-update', () => console.log('[updater] checking...'))
-    autoUpdater.on('update-available', (info) => console.log('[updater] available', info.version))
-    autoUpdater.on('update-downloaded', (info) => console.log('[updater] downloaded', info.version, '- will install on quit'))
-    autoUpdater.on('error', (err) => console.error('[updater] error', err))
-
     setTimeout(() => {
-      void autoUpdater.checkForUpdatesAndNotify().catch((e) => console.error('[updater] check failed', e))
+      // Silent in-app check: progress + result flow to Settings via
+      // evt:updater. Never the OS-level notifier — updates stay inside Spinity.
+      void autoUpdater.checkForUpdates().catch((e) => console.error('[updater] check failed', e))
     }, 3000)
   }
 
@@ -270,9 +512,14 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   // Persist the debounced store before exiting.
   db.flush()
+  shutdownPresence()
+  closeMiniWindow()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', () => {
   db.flush()
+  shutdownPresence()
+  closeMiniWindow()
+  stopPhoneServer()
 })

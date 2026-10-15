@@ -12,3 +12,6 @@ server/.env
 *.tsbuildinfo
 # stray nested copy
 spinity/
+# local scratch (test harnesses, installer probes, build logs)
+.testtmp/
+.freebuff/

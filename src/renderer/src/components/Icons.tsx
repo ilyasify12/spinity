@@ -8,6 +8,8 @@ import type * as React from 'react'
  */
 interface IconProps {
   size?: number
+  /** Optional class (e.g. `.ico-prev` so RTL can mirror the glyph). */
+  className?: string
 }
 
 const base = (size: number) => ({
@@ -34,15 +36,15 @@ export const IconPause = ({ size = 18 }: IconProps): React.JSX.Element => (
   </svg>
 )
 
-export const IconPrev = ({ size = 18 }: IconProps): React.JSX.Element => (
-  <svg {...base(size)} fill="currentColor" stroke="none">
+export const IconPrev = ({ size = 18, className }: IconProps): React.JSX.Element => (
+  <svg {...base(size)} className={className} fill="currentColor" stroke="none">
     <path d="M6 5h2.5v14H6z" />
     <path d="M19 5.5v13L9.5 12z" />
   </svg>
 )
 
-export const IconNext = ({ size = 18 }: IconProps): React.JSX.Element => (
-  <svg {...base(size)} fill="currentColor" stroke="none">
+export const IconNext = ({ size = 18, className }: IconProps): React.JSX.Element => (
+  <svg {...base(size)} className={className} fill="currentColor" stroke="none">
     <path d="M15.5 5H18v14h-2.5z" />
     <path d="M5 5.5v13L14.5 12z" />
   </svg>
@@ -253,5 +255,64 @@ export const IconHeadphones = ({ size = 17 }: IconProps): React.JSX.Element => (
     <path d="M4 13a8 8 0 0116 0" />
     <path d="M4 13a2 2 0 012 2v3a2 2 0 01-2 2h-1a1 1 0 01-1-1v-4a2 2 0 012-2z" />
     <path d="M20 13a2 2 0 00-2 2v3a2 2 0 002 2h1a1 1 0 001-1v-4a2 2 0 00-2-2z" />
+  </svg>
+)
+
+export const IconHome = ({ size = 17 }: IconProps): React.JSX.Element => (
+  <svg {...base(size)}>
+    <path d="M3 10.4L12 3l9 7.4" />
+    <path d="M5.6 9.4V20a1 1 0 001 1H10v-5.4h4V21h3.4a1 1 0 001-1V9.4" />
+  </svg>
+)
+
+export const IconMusic = ({ size = 17 }: IconProps): React.JSX.Element => (
+  <svg {...base(size)}>
+    <circle cx="7" cy="18" r="3" />
+    <circle cx="18" cy="15.5" r="3" />
+    <path d="M10 18V7l11-2.5v11" />
+  </svg>
+)
+
+export const IconChevronRight = ({ size = 15 }: IconProps): React.JSX.Element => (
+  <svg {...base(size)}>
+    <path d="M9 5l7 7-7 7" />
+  </svg>
+)
+
+export const IconChevronLeft = ({ size = 15 }: IconProps): React.JSX.Element => (
+  <svg {...base(size)}>
+    <path d="M15 5l-7 7 7 7" />
+  </svg>
+)
+
+export const IconUpload = ({ size = 15 }: IconProps): React.JSX.Element => (
+  <svg {...base(size)}>
+    <path d="M12 16V4" />
+    <path d="M7 9l5-5 5 5" />
+    <path d="M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3" />
+  </svg>
+)
+
+/** Keyboard glyph for the shortcuts cheat sheet. */
+export const IconKeyboard = ({ size = 16 }: IconProps): React.JSX.Element => (
+  <svg {...base(size)}>
+    <rect x="2" y="6" width="20" height="12" rx="2" />
+    <path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8" />
+  </svg>
+)
+
+/** Target/crosshair — aiming the lyrics at this exact recording. */
+export const IconTarget = ({ size = 14 }: IconProps): React.JSX.Element => (
+  <svg {...base(size)}>
+    <circle cx="12" cy="12" r="8" />
+    <circle cx="12" cy="12" r="3" />
+    <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+  </svg>
+)
+
+/** Half-filled heart used when the current song is liked. */
+export const IconHeart = ({ size = 15, className, filled = false }: IconProps & { filled?: boolean }): React.JSX.Element => (
+  <svg {...base(size)} className={className} fill={filled ? 'currentColor' : 'none'}>
+    <path d="M19 14c1.5-1.5 3-3.2 3-5.5A4.5 4.5 0 0017.5 4c-1.8 0-3.4 1-4.2 2.4h-2.6C9.9 5 8.3 4 6.5 4A4.5 4.5 0 002 8.5c0 2.3 1.5 4 3 5.5l7 7z" />
   </svg>
 )

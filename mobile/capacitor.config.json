@@ -1,0 +1,16 @@
+{
+  "appId": "com.spinity.player",
+  "appName": "Spinity",
+  "webDir": "../website/player",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "webContentsDebuggingEnabled": true
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

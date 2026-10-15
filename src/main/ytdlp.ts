@@ -20,15 +20,64 @@ import type { AppSettings, DownloadJob, SearchResult, StreamInfo, ToolStatus } f
 
 let cachedYtDlp: string | null | undefined
 let cachedFfmpeg: string | null | undefined
+let cachedFfprobe: string | null | undefined
+/** In-flight search, aborted when a newer query arrives. */
+let searchAbort: AbortController | null = null
+/** Resolved stream URLs with expiry (signed CDN URLs die after ~6h). */
+const streamCache = new Map<string, { info: StreamInfo; at: number }>()
+const STREAM_TTL_MS = 3 * 60 * 60 * 1000
+
+export const isWin = process.platform === 'win32'
+export const isMac = process.platform === 'darwin'
+/** Binary name with the platform's extension (.exe on Windows, bare elsewhere). */
+const bin = (name: string): string => (isWin ? `${name}.exe` : name)
+
+/** Spinity-managed tools dir (writable, no admin). Memoized — mkdir once. */
+let toolsDirCache: string | null = null
+export function toolsDir(): string {
+  if (toolsDirCache) return toolsDirCache
+  // Lazy-require electron so unit tests can import this module without it.
+  let base = isMac
+    ? path.join(os.homedir(), 'Library', 'Application Support', 'spinity', 'tools')
+    : path.join(os.homedir(), 'AppData', 'Roaming', 'spinity', 'tools')
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { app } = require('electron') as typeof import('electron')
+    base = path.join(app.getPath('userData'), 'tools')
+  } catch {}
+  try { fs.mkdirSync(base, { recursive: true }) } catch {}
+  toolsDirCache = base
+  return base
+}
+
+/** Well-known install locations for the current OS (Homebrew, pipx, …). */
+function systemToolDirs(tool: string): string[] {
+  if (isWin) return []
+  return [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/opt/local/bin',
+    path.join(os.homedir(), '.local', 'bin')
+  ].map((dir) => path.join(dir, tool))
+}
 
 /** Candidate locations, probed in order. */
 function ytDlpCandidates(): string[] {
   const home = os.homedir()
   const local = process.env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local')
   const roaming = process.env.APPDATA ?? path.join(home, 'AppData', 'Roaming')
+  let managed = ''
+  let managedLegacy = ''
+  try {
+    managed = path.join(toolsDir(), bin('yt-dlp'))
+    managedLegacy = path.join(toolsDir(), 'yt-dlp.exe')
+  } catch {}
 
   const direct = [
     process.env.SPINITY_YTDLP, // explicit override wins
+    managed,
+    managedLegacy,
+    ...systemToolDirs('yt-dlp'),
     path.join(local, 'Programs', 'Python', 'Python311', 'Scripts', 'yt-dlp.exe'),
     path.join(local, 'Programs', 'Python', 'Python312', 'Scripts', 'yt-dlp.exe'),
     path.join(local, 'Programs', 'Python', 'Python313', 'Scripts', 'yt-dlp.exe'),
@@ -37,14 +86,16 @@ function ytDlpCandidates(): string[] {
     path.join(local, 'Programs', 'yt-dlp', 'yt-dlp.exe')
   ].filter((p): p is string => Boolean(p))
 
-  // Any other Python3xx install the user may have.
-  try {
-    const pyRoot = path.join(local, 'Programs', 'Python')
-    for (const entry of fs.readdirSync(pyRoot)) {
-      direct.push(path.join(pyRoot, entry, 'Scripts', 'yt-dlp.exe'))
+  // Any other Python3xx install the user may have (Windows).
+  if (isWin) {
+    try {
+      const pyRoot = path.join(local, 'Programs', 'Python')
+      for (const entry of fs.readdirSync(pyRoot)) {
+        direct.push(path.join(pyRoot, entry, 'Scripts', 'yt-dlp.exe'))
+      }
+    } catch {
+      /* directory absent — fine */
     }
-  } catch {
-    /* directory absent — fine */
   }
   return direct
 }
@@ -52,8 +103,17 @@ function ytDlpCandidates(): string[] {
 function ffmpegCandidates(): string[] {
   const home = os.homedir()
   const local = process.env.LOCALAPPDATA ?? path.join(home, 'AppData', 'Local')
+  let managed = ''
+  let managedBin = ''
+  try {
+    managed = path.join(toolsDir(), bin('ffmpeg'))
+    managedBin = path.join(toolsDir(), 'ffmpeg', 'bin', bin('ffmpeg'))
+  } catch {}
   return [
     process.env.SPINITY_FFMPEG,
+    managed,
+    managedBin,
+    ...systemToolDirs('ffmpeg'),
     path.join(local, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'),
     path.join(local, 'Programs', 'ffmpeg', 'bin', 'ffmpeg.exe'),
     'C:\\ffmpeg\\bin\\ffmpeg.exe'
@@ -72,30 +132,105 @@ export function resolveFfmpeg(): string | null {
   return cachedFfmpeg
 }
 
-/** Run a command to completion, collecting stdout/stderr. */
+/**
+ * ffprobe — the other half of the toolchain: durations, codec tags and, for
+ * local files, the only reliable way to answer "does this file carry a
+ * picture at all?".
+ *
+ * Every distribution ships ffprobe in the same folder as ffmpeg — except the
+ * Spinity-managed install, which copies `ffmpeg.exe` alone into `tools/`,
+ * while the downloaded build's `ffprobe.exe` stays inside
+ * `tools/ffmpeg-dl/<version>/bin/`. So "next to ffmpeg" is not enough:
+ * treating the resulting spawn failure as "no cover here" is what stamped
+ * borrowed (and often wrong) YouTube thumbnails over local files.
+ */
+export function resolveFfprobe(): string | null {
+  if (cachedFfprobe !== undefined) return cachedFfprobe
+  const name = bin('ffprobe')
+  const fromFfmpeg = resolveFfmpeg()
+  const neighbour = fromFfmpeg ? path.join(path.dirname(fromFfmpeg), name) : ''
+  let realNeighbour = ''
+  try {
+    if (fromFfmpeg) realNeighbour = path.join(path.dirname(fs.realpathSync(fromFfmpeg)), name)
+  } catch {}
+  let managed = ''
+  try { managed = path.join(toolsDir(), name) } catch {}
+  const local = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local')
+  const candidates = [
+    process.env.SPINITY_FFPROBE, // explicit override wins
+    neighbour, // winget links, Homebrew, gyan.dev zip: same folder as ffmpeg
+    realNeighbour, // …including when ffmpeg.exe is a link into the package dir
+    managed, // in case a future build drops it next to the managed ffmpeg
+    isWin ? path.join(local, 'Microsoft', 'WinGet', 'Links', name) : '',
+    isWin ? path.join(local, 'Programs', 'ffmpeg', 'bin', name) : '',
+    isWin ? 'C:\\ffmpeg\\bin\\ffprobe.exe' : '',
+    ...systemToolDirs('ffprobe')
+  ].filter((p): p is string => Boolean(p))
+  const found = candidates.find((p) => fs.existsSync(p))
+  if (found) {
+    cachedFfprobe = found
+    return found
+  }
+  // Last resort: the extracted download tree under the managed tools dir.
+  let deep: string | null = null
+  try { deep = findFile(path.join(toolsDir(), 'ffmpeg-dl'), name) } catch {}
+  cachedFfprobe = deep
+  return deep
+}
+
+/** Run a command to completion, collecting stdout/stderr. Abortable via signal. Output capped. */
 function run(
   bin: string,
   args: string[],
-  timeoutMs = 120_000
+  timeoutMs = 120_000,
+  signal?: AbortSignal
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  const MAX_OUT = 2_000_000
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, { shell: false, windowsHide: true })
     let stdout = ''
     let stderr = ''
-    const timer = setTimeout(() => {
-      child.kill()
-      reject(new Error('Timed out'))
-    }, timeoutMs)
-
-    child.stdout.on('data', (d) => (stdout += d.toString()))
-    child.stderr.on('data', (d) => (stderr += d.toString()))
-    child.on('error', (err) => {
+    let done = false
+    const finish = (fn: () => void): void => {
+      if (done) return
+      done = true
       clearTimeout(timer)
-      reject(err)
+      clearTimeout(killTimer)
+      signal?.removeEventListener('abort', onAbort)
+      fn()
+    }
+    const timer = setTimeout(() => {
+      try { child.kill() } catch {}
+      // Grace period then force-kill (hung yt-dlp holds the slot otherwise).
+      killTimer = setTimeout(() => { try { child.kill('SIGKILL' as NodeJS.Signals) } catch {} }, 2000)
+      finish(() => reject(new Error('Timed out')))
+    }, timeoutMs)
+    let killTimer: ReturnType<typeof setTimeout> = setTimeout(() => {}, 0)
+    clearTimeout(killTimer)
+    const onAbort = (): void => {
+      try { child.kill() } catch {}
+      finish(() => reject(new Error('Superseded')))
+    }
+    if (signal) {
+      if (signal.aborted) {
+        child.kill()
+        finish(() => reject(new Error('Superseded')))
+        return
+      }
+      signal.addEventListener('abort', onAbort)
+    }
+
+    child.stdout.on('data', (d) => {
+      if (stdout.length < MAX_OUT) stdout += d.toString().slice(0, MAX_OUT - stdout.length)
+    })
+    child.stderr.on('data', (d) => {
+      if (stderr.length < MAX_OUT) stderr += d.toString().slice(0, MAX_OUT - stderr.length)
+    })
+    child.on('error', (err) => {
+      finish(() => reject(err))
     })
     child.on('close', (code) => {
-      clearTimeout(timer)
-      resolve({ code, stdout, stderr })
+      finish(() => resolve({ code, stdout, stderr }))
     })
   })
 }
@@ -106,25 +241,20 @@ export async function getToolStatus(): Promise<ToolStatus> {
   const ytdlpPath = resolveYtDlp()
   const ffmpegPath = resolveFfmpeg()
 
-  let ytdlpVersion: string | null = null
-  let ffmpegVersion: string | null = null
-
-  if (ytdlpPath) {
+  // Parallel probes with a tight cap — serial 20s+20s froze Settings.
+  const probe = async (bin: string | null, args: string[]): Promise<string | null> => {
+    if (!bin) return null
     try {
-      const r = await run(ytdlpPath, ['--version'], 20_000)
-      ytdlpVersion = r.stdout.trim().split('\n')[0] || null
+      const r = await run(bin, args, 8_000)
+      return r.stdout.trim().split('\n')[0] || null
     } catch {
-      ytdlpVersion = null
+      return null
     }
   }
-  if (ffmpegPath) {
-    try {
-      const r = await run(ffmpegPath, ['-version'], 20_000)
-      ffmpegVersion = r.stdout.split('\n')[0].trim() || null
-    } catch {
-      ffmpegVersion = null
-    }
-  }
+  const [ytdlpVersion, ffmpegVersion] = await Promise.all([
+    probe(ytdlpPath, ['--version']),
+    probe(ffmpegPath, ['-version']).then((v) => v?.split('\n')[0].trim() ?? null)
+  ])
 
   return {
     ytdlpPath,
@@ -166,29 +296,51 @@ interface FlatEntry {
  * and skips extracting each video individually, so a 20-hit search returns in
  * a couple of seconds instead of a minute.
  */
-export async function search(query: string, limit = 20): Promise<SearchResult[]> {
+export async function search(query: string, limit = 20, opts?: { background?: boolean }): Promise<SearchResult[]> {
   const bin = resolveYtDlp()
   if (!bin) throw new Error('yt-dlp was not found on this system')
 
   const trimmed = query.trim()
   if (!trimmed) return []
 
+  // Foreground search: a new query kills the previous one. Background work
+  // (cover art) never touches the shared controller, so it can't cancel typing.
+  const background = opts?.background === true
+  let ctrl: AbortController | null = null
+  if (!background) {
+    searchAbort?.abort()
+    ctrl = new AbortController()
+    searchAbort = ctrl
+  } else {
+    ctrl = new AbortController()
+  }
+
   // Clamp so a hostile renderer can't ask for a million results.
   const n = Math.max(1, Math.min(50, Math.floor(limit)))
 
-  const { stdout } = await run(
-    bin,
-    [
-      '--dump-single-json',
-      '--flat-playlist',
-      '--no-warnings',
-      '--ignore-errors',
-      '--socket-timeout',
-      '15',
-      `ytsearch${n}:${trimmed}`
-    ],
-    90_000
-  )
+  let stdout: string
+  try {
+    ;({ stdout } = await run(
+      bin,
+      [
+        '--dump-single-json',
+        '--flat-playlist',
+        '--no-warnings',
+        '--ignore-errors',
+        '--socket-timeout',
+        '10',
+        `ytsearch${n}:${trimmed}`
+      ],
+      60_000,
+      ctrl.signal
+    ))
+  } catch (err) {
+    // Superseded searches die quietly — a newer query is already running.
+    if (err instanceof Error && err.message === 'Superseded') throw err
+    throw err
+  } finally {
+    if (!background && searchAbort === ctrl) searchAbort = null
+  }
 
   let parsed: { entries?: FlatEntry[] }
   try {
@@ -196,7 +348,6 @@ export async function search(query: string, limit = 20): Promise<SearchResult[]>
   } catch {
     throw new Error('Could not parse search results (yt-dlp output was not JSON)')
   }
-
   const entries = parsed.entries ?? []
   return entries
     .filter((e): e is FlatEntry & { id: string } => Boolean(e.id))
@@ -210,7 +361,8 @@ export async function search(query: string, limit = 20): Promise<SearchResult[]>
         durationSec: typeof e.duration === 'number' ? Math.round(e.duration) : 0,
         // Prefer the deterministic i.ytimg.com URL: it always resolves and
         // needs no extra request. `e.thumbnail` can be a signed/hotlink URL.
-        thumbnail: `https://i.ytimg.com/vi/${e.id}/mqdefault.jpg`,
+        // hqdefault (480x360) keeps large tiles sharp; it exists for every video.
+        thumbnail: `https://i.ytimg.com/vi/${e.id}/hqdefault.jpg`,
         webUrl: e.webpage_url || e.url || `https://www.youtube.com/watch?v=${e.id}`
       }
     })
@@ -246,14 +398,38 @@ class DownloadManager {
   private running = 0
   private cap = 2
   private listener: JobListener = () => {}
+  private lastEmit = new Map<string, number>()
 
   onChange(fn: JobListener): void {
     this.listener = fn
   }
 
-  private emit(job: DownloadJob): void {
+  private emit(job: DownloadJob, throttleProgress = false): void {
     job.updatedAt = Date.now()
+    if (throttleProgress) {
+      const last = this.lastEmit.get(job.id) ?? 0
+      if (Date.now() - last < 250 && job.status !== 'done' && job.status !== 'error' && job.status !== 'canceled') return
+    }
+    this.lastEmit.set(job.id, Date.now())
     this.listener({ ...job })
+    // Long sessions must not accumulate finished rows forever (low-RAM PCs):
+    // keep the newest 100, evicting the oldest terminal jobs first.
+    if (job.status === 'done' || job.status === 'error' || job.status === 'canceled') {
+      this.lastEmit.delete(job.id)
+      this.prune()
+    }
+  }
+
+  private prune(): void {
+    if (this.jobs.size <= 100) return
+    // Insertion-ordered Map: oldest first, no sort needed.
+    for (const [id, j] of this.jobs) {
+      if (this.jobs.size <= 100) break
+      if (j.status === 'done' || j.status === 'error' || j.status === 'canceled') {
+        this.jobs.delete(id)
+        this.requests.delete(id)
+      }
+    }
   }
 
   list(): DownloadJob[] {
@@ -300,15 +476,24 @@ class DownloadManager {
 
     const child = this.children.get(jobId)
     if (child?.pid) {
-      // ffmpeg runs as a grandchild of yt-dlp, so signal the whole tree.
-      // /T = tree, /F = force.
-      try {
-        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
-          shell: false,
-          windowsHide: true
-        })
-      } catch {
-        child.kill()
+      if (isWin) {
+        // ffmpeg runs as a grandchild of yt-dlp, so signal the whole tree.
+        // /T = tree, /F = force.
+        try {
+          spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+            shell: false,
+            windowsHide: true
+          })
+        } catch {
+          child.kill()
+        }
+      } else {
+        // POSIX: SIGTERM, escalate to SIGKILL shortly after.
+        try { child.kill('SIGTERM') } catch {}
+        const pid = child.pid
+        setTimeout(() => {
+          try { process.kill(pid, 0); child.kill('SIGKILL') } catch {}
+        }, 2000).unref?.()
       }
       this.children.delete(jobId)
     }
@@ -389,21 +574,30 @@ class DownloadManager {
         const pct = Number(m[1])
         if (Number.isFinite(pct)) {
           // Reserve the top 10% of the bar for the ffmpeg transcode step.
-          job.progress = Math.min(90, Math.round(pct * 0.9))
-          this.emit(job)
+          const next = Math.min(90, Math.round(pct * 0.9))
+          if (next !== job.progress) {
+            job.progress = next
+            this.emit(job, true)
+          }
         }
         return
       }
       if (line.includes('[ExtractAudio]') || line.includes('[ffmpeg]')) {
         job.status = 'converting'
         job.progress = 92
-        this.emit(job)
+        this.emit(job, true)
         return
       }
-      // `--print after_move:filepath` writes a bare path, and by the time it
-      // appears the file is already moved into place.
+      // `--print after_move:filepath` writes a bare path. Don't hit the disk
+      // per line — remember the candidate, validate once on close.
+      // Windows (`C:\…`) and POSIX (`/…`) absolutes both accepted.
       const trimmed = line.trim()
-      if (trimmed && !trimmed.startsWith('[') && fs.existsSync(trimmed)) {
+      if (
+        trimmed &&
+        !trimmed.startsWith('[') &&
+        (/^[A-Za-z]:/.test(trimmed) || trimmed.startsWith('/')) &&
+        /\.(m4a|mp3|opus|flac|wav|ogg|mka)$/i.test(trimmed)
+      ) {
         finalPath = trimmed
       }
     }
@@ -507,13 +701,30 @@ export async function resolveStreamUrl(videoId: string): Promise<StreamInfo> {
     throw new Error('Invalid video id')
   }
 
+  // Repeat plays resolve instantly — signed URLs live ~6h, we trust 3h.
+  // True LRU: refresh recency on hit, evict oldest insertion without sorting.
+  const hit = streamCache.get(videoId)
+  if (hit && Date.now() - hit.at < STREAM_TTL_MS) {
+    streamCache.delete(videoId)
+    streamCache.set(videoId, hit)
+    return hit.info
+  }
+  if (streamCache.size >= 200) {
+    const oldest = streamCache.keys().next()
+    if (!oldest.done) streamCache.delete(oldest.value)
+  }
+
   const { stdout } = await run(
     bin,
     [
       '--no-playlist',
       '--no-warnings',
-      '--socket-timeout', '15',
+      '--socket-timeout', '10',
       '--retries', '2',
+      // NOTE (1.1.5): the android player fast-lane broke streams for some
+      // networks/videos, so this is back to yt-dlp's default client
+      // selection — slower to resolve, but it plays everywhere 1.0.1 did.
+      // The URL cache below keeps repeat plays instant regardless.
       '-f',
       // m4a (AAC) and webm (Opus) both play natively in Chromium. The final
       // fallback keeps things working if the first two formats are absent.
@@ -526,7 +737,7 @@ export async function resolveStreamUrl(videoId: string): Promise<StreamInfo> {
       '--print', '%(url)s|%(ext)s|%(protocol)s',
       `https://www.youtube.com/watch?v=${videoId}`
     ],
-    60_000
+    45_000
   )
 
   // Take the LAST non-empty line: yt-dlp writes its own messages to stderr,
@@ -539,7 +750,169 @@ export async function resolveStreamUrl(videoId: string): Promise<StreamInfo> {
     throw new Error('Could not resolve a stream URL (yt-dlp output was unexpected)')
   }
 
-  return { url, ext, protocol }
+  const info = { url, ext, protocol }
+  streamCache.set(videoId, { info, at: Date.now() })
+  return info
+}
+
+// ------------------------------------------------------- install / repair
+
+function downloadFile(url: string, dest: string, timeoutMs = 300_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Download timed out')), timeoutMs)
+    const doGet = (u: string): void => {
+      // Static imports keep types simple; both modules expose .get().
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const mod = u.startsWith('https:') ? require('node:https') as typeof import('node:https') : require('node:http') as typeof import('node:http')
+      const req = mod.get(u, { headers: { 'User-Agent': 'spinity' } }, (res: import('node:http').IncomingMessage) => {
+        const status = res.statusCode ?? 0
+        if (status >= 300 && status < 400 && res.headers.location) {
+          res.resume()
+          doGet(res.headers.location)
+          return
+        }
+        if (status !== 200) {
+          clearTimeout(timer)
+          reject(new Error(`Download failed (HTTP ${status})`))
+          return
+        }
+        const out = fs.createWriteStream(dest)
+        res.pipe(out)
+        out.on('finish', () => {
+          clearTimeout(timer)
+          out.close()
+          resolve()
+        })
+        out.on('error', (e: Error) => {
+          clearTimeout(timer)
+          reject(e)
+        })
+      })
+      req.on('error', (e: Error) => {
+        clearTimeout(timer)
+        reject(e)
+      })
+    }
+    try {
+      doGet(url)
+    } catch (e: unknown) {
+      clearTimeout(timer)
+      reject(e instanceof Error ? e : new Error(String(e)))
+    }
+  })
+}
+
+/** Check for a usable Python (needed only for pip-based yt-dlp installs). */
+export async function getPythonStatus(): Promise<{ path: string | null; version: string | null }> {
+  for (const bin of ['py', 'python', 'python3']) {
+    try {
+      const args = bin === 'py' ? ['-3', '--version'] : ['--version']
+      const r = await run(bin, args, 15_000)
+      const out = `${r.stdout}${r.stderr}`.trim().split('\n')[0]
+      if (r.code === 0 && /python/i.test(out)) return { path: bin, version: out }
+    } catch {}
+  }
+  return { path: null, version: null }
+}
+
+/**
+ * Download a standalone yt-dlp (no Python needed) into the
+ * Spinity-managed tools dir. URL = latest GitHub release, asset per OS.
+ */
+export async function installYtDlp(): Promise<string> {
+  const dir = toolsDir()
+  const name = bin('yt-dlp')
+  const dest = path.join(dir, name)
+  const tmp = `${dest}.download`
+  // Windows build needs nothing; macOS build is a universal binary.
+  const asset = isWin ? 'yt-dlp.exe' : isMac ? 'yt-dlp_macos' : 'yt-dlp_linux'
+  await downloadFile(`https://github.com/yt-dlp/yt-dlp/releases/latest/download/${asset}`, tmp)
+  fs.renameSync(tmp, dest)
+  if (!isWin) {
+    try { fs.chmodSync(dest, 0o755) } catch {}
+  }
+  cachedYtDlp = undefined
+  const found = resolveYtDlp()
+  if (!found) throw new Error('Download finished but yt-dlp was not found')
+  const status = await getToolStatus()
+  return `yt-dlp installed to ${found} (version ${status.ytdlpVersion ?? 'unknown'})`
+}
+
+/**
+ * Install ffmpeg without admin rights.
+ * Windows: 1. try `winget install ffmpeg`, else 2. gyan.dev zip.
+ * macOS: `brew install ffmpeg` (Homebrew), else a clear pointer.
+ */
+export async function installFfmpeg(): Promise<string> {
+  if (isMac) {
+    try {
+      const r = await run('brew', ['install', 'ffmpeg'], 600_000)
+      cachedFfmpeg = undefined
+      cachedFfprobe = undefined
+      if (resolveFfmpeg()) return `ffmpeg installed via Homebrew.\n${r.stdout.slice(-1000)}`
+    } catch {}
+    throw new Error('Could not install ffmpeg automatically. Install Homebrew (https://brew.sh) then run: brew install ffmpeg')
+  }
+  // Fast path: winget (no download plumbing, auto-updates).
+  try {
+    const r = await run('winget', ['install', '--id', 'Gyan.FFmpeg', '-e', '--silent', '--accept-package-agreements', '--accept-source-agreements'], 600_000)
+    cachedFfmpeg = undefined
+    cachedFfprobe = undefined
+    if (resolveFfmpeg()) return `ffmpeg installed via winget.\n${r.stdout.slice(-1000)}`
+  } catch {}
+  // Fallback: direct zip download (~80MB).
+  const dir = toolsDir()
+  const zipPath = path.join(dir, 'ffmpeg-essentials.zip')
+  const extractDir = path.join(dir, 'ffmpeg-dl')
+  await downloadFile('https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip', zipPath)
+  fs.mkdirSync(extractDir, { recursive: true })
+  // Expand-Archive via powershell (Windows-only app).
+  await run('powershell', ['-NoProfile', '-Command', `Expand-Archive -Force '${zipPath}' '${extractDir}'`], 300_000)
+  // Find bin/ffmpeg.exe inside the extracted tree.
+  const found = findFile(extractDir, 'ffmpeg.exe')
+  if (!found) throw new Error('ffmpeg download finished but ffmpeg.exe was not found in the archive')
+  const dest = path.join(dir, 'ffmpeg.exe')
+  fs.copyFileSync(found, dest)
+  // Keep ffprobe in the managed folder too: it is what durations, codec tags
+  // and embedded artwork all depend on, and the zip is the only install path
+  // that would otherwise leave it unreachable.
+  const foundProbe = findFile(extractDir, bin('ffprobe'))
+  if (foundProbe) {
+    try { fs.copyFileSync(foundProbe, path.join(dir, bin('ffprobe'))) } catch {}
+  }
+  try { fs.rmSync(zipPath, { force: true }) } catch {}
+  cachedFfmpeg = undefined
+  cachedFfprobe = undefined
+  return `ffmpeg installed to ${dest}`
+}
+
+function findFile(root: string, name: string): string | null {
+  const stack = [root]
+  while (stack.length) {
+    const cur = stack.pop()!
+    let entries: fs.Dirent[] = []
+    try { entries = fs.readdirSync(cur, { withFileTypes: true }) } catch { continue }
+    for (const e of entries) {
+      const full = path.join(cur, e.name)
+      if (e.isFile() && e.name.toLowerCase() === name.toLowerCase()) return full
+      if (e.isDirectory()) stack.push(full)
+    }
+  }
+  return null
+}
+
+/** `pip install -U yt-dlp` via the detected Python (for pip-based setups). */
+export async function installPythonDeps(): Promise<string> {
+  const py = await getPythonStatus()
+  if (!py.path) {
+    throw new Error('Python not found — install it from https://www.python.org/downloads/ (tick "Add python to PATH"), then retry. Or use "Download yt-dlp" above which needs no Python.')
+  }
+  const base = py.path === 'py' ? ['-3', '-m', 'pip'] : ['-m', 'pip']
+  const r = await run(py.path, [...base, 'install', '-U', 'yt-dlp'], 600_000)
+  cachedYtDlp = undefined
+  const out = `${r.stdout}\n${r.stderr}`.trim()
+  if (r.code !== 0) throw new Error(out || 'pip install failed')
+  return out.slice(-2000)
 }
 
 

@@ -28,7 +28,7 @@ export interface ConversationView {
   unread: number
 }
 
-export type MessageKind = 'text' | 'playlist' | 'track' | 'system'
+export type MessageKind = 'text' | 'playlist' | 'track' | 'system' | 'image'
 
 export interface SharedTrack {
   videoId: string
@@ -80,7 +80,8 @@ export type SocialEvent =
   | { type: 'friend:request'; payload: unknown }
   | { type: 'friend:updated'; payload: unknown }
   | { type: 'presence:update'; payload: { userId: string; status: string } }
-  | { type: 'chat:message'; payload: MessageView & { conversationId: string } }
+  | { type: 'chat:message'; payload: MessageView & { conversationId: string; senderName?: string | null } }
+  | { type: 'chat:deleted'; payload: { conversationId: string; messageId: string } }
   | { type: 'chat:typing'; payload: { from: string; isTyping: boolean } }
   | { type: 'call:incoming'; payload: { from: string; callId: string } }
   | { type: 'call:accepted'; payload: { from: string; callId: string } }

@@ -1,0 +1,46 @@
+# Mac build — electron-builder can only target macOS *from* macOS,
+# so this workflow builds Spinity for Apple Silicon + Intel in the cloud.
+#
+#   Manual:  Actions tab → "Build Mac" → Run workflow
+#   Release: pushing a tag like v1.1.8 builds + attaches the DMGs to the
+#            GitHub Release (needs no signing; users right-click → Open).
+#
+# The DMGs are unsigned (no Apple Developer cert in CI). Gatekeeper will
+# warn on first launch — that is expected until signing is set up.
+
+name: Build Mac
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+      - run: npm test
+
+      - run: npm run dist:mac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spinity-mac
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
+            release/*.yml

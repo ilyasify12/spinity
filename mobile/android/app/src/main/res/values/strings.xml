@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Spinity</string>
+    <string name="title_activity_main">Spinity</string>
+    <string name="package_name">com.spinity.player</string>
+    <string name="custom_url_scheme">com.spinity.player</string>
+</resources>

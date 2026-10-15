@@ -227,3 +227,83 @@ Two cautions before running any of them:
 - No playlist/library export-import yet, which matters if the JSON store in
   `%APPDATA%\spinity\spinity.json` is ever lost.
 
+## v1.3.0 (AURORA) — build status, 2026-10-03
+
+Version bumped to **1.3.0** in `package.json` and `package-lock.json`, with
+matching `CHANGELOG.md` and `WhatsNew.tsx` entries for the AURORA redesign
+(glass-on-midnight shell, drifting aurora backdrop, Blaze/Violet/Ice/Rose/Mint
+accent palette). `npm run typecheck` and `npm run build` both pass.
+`release/win-unpacked/Spinity.exe` reports FileVersion 1.3.0 and its
+`app.asar` contains the `AURORA` / `aurora-drift` / `Blaze` / `Mint` strings.
+
+### NSIS installers cannot run on this machine (2026-10-03)
+
+electron-builder first compiles a small `BUILD_UNINSTALLER` stub to
+`release/Spinity-Setup-<version>.exe`, then **runs it** to generate the
+uninstaller. That run is what fails:
+
+```
+release\Spinity-Setup-1.3.0.exe process failed 2
+Exit code: 2
+```
+
+This is not a project regression. Measured on this machine:
+
+| Test | Result |
+| --- | --- |
+| trivial 5-line NSIS installer, compiled with the cached makensis | exit 2, dialog `NSIS Error — Error writing temporary file. Make sure your temp folder is valid.` |
+| same probe with `TEMP`/`TMP` pointed at a fresh `C:\nsis-tmp` | exit 2 |
+| `release/Spinity-Setup-1.2.0.exe` — built here on 2026-09-27 and working then | exit 2 |
+| unsigned non-NSIS exe (`7za.exe`) writing files | OK, exit 0 |
+| `%TEMP%` writable from PowerShell, 176 GB free, no Mark-of-the-Web on outputs | OK |
+
+So **every** NSIS installer aborts during its own startup on this machine,
+including the ones already released. Anything that executes an NSIS installer —
+running any Spinity installer, the in-app auto-update path — fails the same way.
+Moving the project from `Documents` to `Desktop` changed nothing, so this is a
+machine-health problem to fix separately, not a project or path problem.
+
+Context worth checking: there is a `C:\Windows.old` (recent Windows upgrade),
+Node/npm have moved on since these notes were written (v24.21.0 / 11.19.0), and
+the Defender operational log shows something else on the box repeatedly trying to
+disable real-time protection and being reverted by Tamper Protection. A reboot
+and a look at third-party AV/security software is the first thing to try.
+
+### Workaround: extract the uninstaller instead of running the stub
+
+`app-builder-lib` already ships a second, non-executing code path —
+`UninstallerReader.exec()` in
+`node_modules/app-builder-lib/out/targets/nsis/nsisUtil.js` — which it uses on
+macOS Catalina and VM builds. It parses the stub's PE image plus its inner NSIS
+block and writes the uninstaller directly. Against the stub from this build it
+produced a valid 252,708-byte uninstaller.
+
+`node_modules/app-builder-lib/out/targets/nsis/NsisTarget.js` was therefore
+patched so the Windows branch tries that reader first and only falls back to
+running the stub if parsing fails. With the patch `npm run dist` completes
+(exit 0) and emits:
+
+```
+release\Spinity-Setup-1.3.0.exe           113,082,374 bytes
+release\Spinity-Setup-1.3.0.exe.blockmap
+release\latest.yml                        version 1.3.0 + sha512 + size
+```
+
+**The patch lives in `node_modules`, so any `npm install` / `npm ci` reverts
+it.** Re-apply it before the next `npm run dist` on this machine, or build on a
+machine where NSIS installers run normally.
+
+**Not verified at runtime:** because this machine cannot execute NSIS
+installers, the finished installer could not be launched or installed here, so
+neither the installer nor the parsed uninstaller has actually been exercised.
+Test a full install/uninstall on a clean machine before publishing the release.
+
+### Runnable build without NSIS
+
+```
+release\win-unpacked\Spinity.exe     (launch directly — already the 1.3.0 build)
+```
+
+The earlier portable zip did not survive the move to `Desktop`; re-create it any
+time by zipping `release\win-unpacked`.
+

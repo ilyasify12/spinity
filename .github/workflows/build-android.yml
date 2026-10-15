@@ -1,0 +1,60 @@
+# Android build — the APK is built in the cloud, like the Mac DMGs
+# (see build-mac.yml). No Android SDK is needed on anyone's laptop.
+#
+#   Manual:  Actions tab -> "Build Android" -> Run workflow
+#   Release: pushing a tag like v1.1.8 attaches the APK to the GitHub Release.
+#
+# The APK is debug-signed (installable by sideloading; no Play Store).
+# The web player it wraps comes from website/player via `cap sync` — the
+# same files the desktop app serves, so the two can never drift apart.
+
+name: Build Android
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      # Capacitor 8's Android template needs JDK 21 (AGP 8.13).
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Install mobile dependencies
+        run: npm ci --no-audit --no-fund
+        working-directory: mobile
+
+      - name: Copy web player into the APK project
+        run: npx cap sync android
+        working-directory: mobile
+
+      - name: Build debug APK
+        # Checkout on Linux honours the committed file modes; this repo was
+        # committed from Windows (core.filemode=false), so gradlew arrives
+        # without its executable bit.
+        run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon
+        working-directory: mobile/android
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spinity-android
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
