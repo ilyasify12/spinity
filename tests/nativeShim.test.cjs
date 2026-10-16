@@ -1,7 +1,8 @@
 'use strict';
 // Native shell (website/player/native.js): the APK has no server, so the shim
 // answers every /api/... call itself. These tests run it against a fake
-// Capacitor bridge and a fake Termux: nothing here touches a real phone.
+// Capacitor bridge (SpinityBridge + TermuxBridge + Filesystem): nothing here
+// touches a real phone.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -12,30 +13,60 @@ const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'website', 'player', '
 
 const b64 = (s) => Buffer.from(s, 'utf8').toString('base64');
 
-function makeSandbox({ native, db }) {
+function makeLocalStorage() {
+  return {
+    _d: {},
+    get length() { return Object.keys(this._d).length; },
+    key(i) { return Object.keys(this._d)[i] ?? null; },
+    getItem(k) { return k in this._d ? this._d[k] : null; },
+    setItem(k, v) { this._d[k] = String(v); },
+    removeItem(k) { delete this._d[k]; }
+  };
+}
+
+/**
+ * @param {object} opts
+ * @param {boolean} opts.native
+ * @param {'termux'|'embedded'} [opts.engine]   which download engine to fake
+ * @param {object} [opts.bridge]                mutable fake-bridge state
+ * @param {Array}  [opts.bridge.files]          scanAudio file list (mutable)
+ * @param {Array}  [opts.bridge.meta]           scanAudio metadata list
+ */
+function makeSandbox({ native, engine = 'termux', bridge = {}, db }) {
   const files = { 'Download/Spinity/existing.mp3': b64('OLD') };
   const execs = [];
   const intervals = [];
+  const bridgeCalls = [];
+  const bridgeState = {
+    available: engine === 'embedded',
+    initializing: false,
+    error: engine === 'embedded' ? undefined : 'no engine in this build',
+    version: '2026.01.01',
+    files: [],
+    meta: [],
+    importCount: 0,
+    roots: {
+      audio: '/storage/emulated/0/Download/Spinity/audio',
+      music: '/storage/emulated/0/Music',
+      downloads: '/storage/emulated/0/Download'
+    },
+    ...bridge
+  };
+  if (engine === 'embedded' && !bridgeState.searchEntries) {
+    bridgeState.searchEntries = [
+      { id: 'abc123', title: 'Centuries', channel: 'Fall Out Boy', duration: 200, thumbnails: [{ url: 'https://i.ytimg.com/vi/abc123/hqdefault.jpg' }] }
+    ];
+  }
 
   const sandbox = {
     console,
-    Promise, JSON, Date, Math,
+    Promise, JSON, Date, Math, Object,
     Response, URLSearchParams, TextDecoder, atob,
     setTimeout, clearTimeout,
     setInterval: (fn, ms) => { const id = setInterval(fn, ms); intervals.push(id); return id; },
     clearInterval,
-    localStorage: {
-      _d: {},
-      getItem(k) { return k in this._d ? this._d[k] : null; },
-      setItem(k, v) { this._d[k] = String(v); },
-      removeItem(k) { delete this._d[k]; }
-    },
-    sessionStorage: {
-      _d: {},
-      getItem(k) { return k in this._d ? this._d[k] : null; },
-      setItem(k, v) { this._d[k] = String(v); },
-      removeItem(k) { delete this._d[k]; }
-    },
+    localStorage: makeLocalStorage(),
+    sessionStorage: makeLocalStorage(),
     navigator: {},
     Capacitor: {
       isNativePlatform: () => native,
@@ -49,6 +80,47 @@ function makeSandbox({ native, db }) {
           async stat({ path: p }) {
             if (!(p in files)) throw new Error('File does not exist');
             return {};
+          }
+        },
+        SpinityBridge: {
+          async ytdlpAvailable() {
+            bridgeCalls.push({ method: 'ytdlpAvailable' });
+            return {
+              available: bridgeState.available,
+              initializing: bridgeState.initializing,
+              error: bridgeState.error,
+              version: bridgeState.version
+            };
+          },
+          async ytdlpSearch(opts) {
+            bridgeCalls.push({ method: 'ytdlpSearch', ...opts });
+            return { entries: bridgeState.searchEntries || [] };
+          },
+          async ytdlpDownload(opts) {
+            bridgeCalls.push({ method: 'ytdlpDownload', ...opts });
+            files[`Download/Spinity/audio/${opts.videoId}.mp3`] = b64('MP3DATA');
+            return { jobId: 'ejob1' };
+          },
+          async ytdlpJob(opts) {
+            bridgeCalls.push({ method: 'ytdlpJob', ...opts });
+            return { state: 'done', progress: 100, path: '/storage/emulated/0/Download/Spinity/audio/abc123.mp3' };
+          },
+          async ytdlpUpdate() {
+            bridgeCalls.push({ method: 'ytdlpUpdate' });
+            return { status: 'DONE' };
+          },
+          async scanAudio(opts) {
+            bridgeCalls.push({ method: 'scanAudio', ...opts });
+            return {
+              roots: bridgeState.roots,
+              needPermission: false,
+              files: bridgeState.files,
+              meta: bridgeState.meta
+            };
+          },
+          async importAudio() {
+            bridgeCalls.push({ method: 'importAudio' });
+            return { count: bridgeState.importCount };
           }
         },
         TermuxBridge: {
@@ -102,11 +174,14 @@ function makeSandbox({ native, db }) {
   sandbox.cleanup = () => intervals.forEach(clearInterval);
   sandbox.files = files;
   sandbox.execs = execs;
+  sandbox.bridgeCalls = bridgeCalls;
+  sandbox.bridgeState = bridgeState;
   return sandbox;
 }
 
 const getJson = async (sb, url, init) => (await sb.window.fetch(url, init)).json();
 const post = (body) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const runScan = (sb) => sb.window.spinitySettings.scanNow();
 
 test('native: seeds the token and routes library / me / likes', async () => {
   const sb = makeSandbox({ native: true });
@@ -144,8 +219,25 @@ test('native: playlists create / add / remove / delete', async () => {
   } finally { sb.cleanup(); }
 });
 
-test('native: ytsearch runs yt-dlp through Termux and maps the results', async () => {
-  const sb = makeSandbox({ native: true });
+test('native: search uses the bundled engine when it is up (no Termux involved)', async () => {
+  const sb = makeSandbox({ native: true, engine: 'embedded' });
+  try {
+    const rows = await getJson(sb, '/api/ytsearch?q=fall%20out%20boy');
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, 'yt_abc123');
+    assert.equal(rows[0].title, 'Centuries');
+    assert.equal(rows[0].artist, 'Fall Out Boy');
+    assert.equal(rows[0].durationSec, 200);
+    assert.equal(rows[0].thumbnail, 'https://i.ytimg.com/vi/abc123/hqdefault.jpg');
+    assert.equal(sb.execs.length, 0); // Termux untouched
+    const search = sb.bridgeCalls.find((c) => c.method === 'ytdlpSearch');
+    assert.equal(search.q, 'fall out boy');
+    assert.equal(search.limit, 12);
+  } finally { sb.cleanup(); }
+});
+
+test('native: with no bundled engine, search falls back to yt-dlp via Termux', async () => {
+  const sb = makeSandbox({ native: true, engine: 'termux' });
   try {
     const rows = await getJson(sb, '/api/ytsearch?q=fall%20out%20boy');
     assert.equal(rows.length, 2);
@@ -165,13 +257,36 @@ test('native: ytsearch runs yt-dlp through Termux and maps the results', async (
   } finally { sb.cleanup(); }
 });
 
-test('native: save downloads and the track only appears once the mp3 exists', async () => {
-  const sb = makeSandbox({ native: true });
+test('native: save with the bundled engine downloads and lands in the library', async () => {
+  const sb = makeSandbox({ native: true, engine: 'embedded' });
   try {
     const track = { id: 'yt_abc123', title: 'Centuries', artist: 'Fall Out Boy', durationSec: 200, thumbnail: 'https://i.ytimg.com/vi/abc123/hqdefault.jpg' };
     const save = await getJson(sb, '/api/save', post(track));
     assert.deepEqual(save, { ok: true });
-    // not in the library yet: the file is still downloading
+    assert.equal((await getJson(sb, '/api/library')).tracks.length, 0); // not yet
+
+    const dl = sb.bridgeCalls.find((c) => c.method === 'ytdlpDownload');
+    assert.equal(dl.videoId, 'abc123');
+    assert.equal(sb.execs.length, 0); // no Termux
+
+    await new Promise((r) => setTimeout(r, 2600)); // one poller tick
+    const lib = await getJson(sb, '/api/library');
+    assert.equal(lib.tracks.length, 1);
+    assert.equal(lib.tracks[0].id, 'yt_abc123');
+    assert.equal(lib.tracks[0].file, '/storage/emulated/0/Download/Spinity/audio/abc123.mp3');
+
+    const stream = await sb.window.fetch('/api/stream?id=yt_abc123');
+    assert.equal(stream.status, 200);
+    assert.equal(Buffer.from(await stream.arrayBuffer()).toString('utf8'), 'MP3DATA');
+  } finally { sb.cleanup(); }
+});
+
+test('native: save without the engine still works through Termux', async () => {
+  const sb = makeSandbox({ native: true, engine: 'termux' });
+  try {
+    const track = { id: 'yt_abc123', title: 'Centuries', artist: 'Fall Out Boy', durationSec: 200, thumbnail: 'https://i.ytimg.com/vi/abc123/hqdefault.jpg' };
+    const save = await getJson(sb, '/api/save', post(track));
+    assert.deepEqual(save, { ok: true });
     assert.equal((await getJson(sb, '/api/library')).tracks.length, 0);
 
     // let the fake Termux finish + one poller tick (2s interval)
@@ -185,6 +300,116 @@ test('native: save downloads and the track only appears once the mp3 exists', as
     assert.equal(stream.status, 200);
     assert.equal(stream.headers.get('content-length'), '7');
     assert.equal(Buffer.from(await stream.arrayBuffer()).toString('utf8'), 'MP3DATA');
+  } finally { sb.cleanup(); }
+});
+
+test('native: local scan merges phone files with real metadata + covers', async () => {
+  const sb = makeSandbox({
+    native: true,
+    bridge: {
+      files: [
+        { path: '/storage/emulated/0/Download/Spinity/audio/mine.mp3', name: 'mine.mp3', size: 111, mtime: 1000 },
+        { path: '/storage/emulated/0/Music/Album/track_two.flac', name: 'track_two.flac', size: 222, mtime: 2000 }
+      ],
+      meta: [
+        { path: '/storage/emulated/0/Download/Spinity/audio/mine.mp3', title: 'My Song', artist: 'Me', durationSec: 180, cover: '/storage/emulated/0/Download/Spinity/covers/abc.jpg' },
+        { path: '/storage/emulated/0/Music/Album/track_two.flac', title: 'Track Two', artist: 'Band', durationSec: 200 }
+      ]
+    }
+  });
+  try {
+    const r = await runScan(sb);
+    assert.equal(r.total, 2);
+    assert.equal(r.added, 2);
+
+    const scan = sb.bridgeCalls.find((c) => c.method === 'scanAudio');
+    assert.equal(scan.folders.join(','), 'audio,music'); // default options
+    assert.deepEqual(JSON.parse(scan.knownJson), {});
+
+    const lib = await getJson(sb, '/api/library');
+    assert.equal(lib.tracks.length, 2);
+    const mine = lib.tracks.find((t) => /mine\.mp3$/.test(t.file));
+    assert.match(mine.id, /^loc_/);
+    assert.equal(mine.title, 'My Song');
+    assert.equal(mine.artist, 'Me');
+    assert.equal(mine.durationSec, 180);
+    assert.equal(mine.source, 'local');
+    assert.equal(mine.thumbnail, 'https://localhost/_capacitor_file_/storage/emulated/0/Download/Spinity/covers/abc.jpg');
+
+    const two = lib.tracks.find((t) => /track_two\.flac$/.test(t.file));
+    assert.equal(two.title, 'Track Two');
+    assert.equal(two.thumbnail, ''); // no embedded art: never a guessed image
+
+    // rescan sends the known cache back so the bridge can skip tag parsing
+    await runScan(sb);
+    const scans = sb.bridgeCalls.filter((c) => c.method === 'scanAudio');
+    const known = JSON.parse(scans[scans.length - 1].knownJson);
+    assert.equal(known['/storage/emulated/0/Download/Spinity/audio/mine.mp3'], '1000:111');
+  } finally { sb.cleanup(); }
+});
+
+test('native: scanned files the user deleted disappear on the next scan', async () => {
+  const bridge = {
+    files: [{ path: '/storage/emulated/0/Music/gone.mp3', name: 'gone.mp3', size: 10, mtime: 5 }],
+    meta: [{ path: '/storage/emulated/0/Music/gone.mp3', title: 'Gone', artist: 'Someone' }]
+  };
+  const sb = makeSandbox({ native: true, bridge });
+  try {
+    await runScan(sb);
+    assert.equal((await getJson(sb, '/api/library')).tracks.length, 1);
+    sb.bridgeState.files = [];
+    sb.bridgeState.meta = [];
+    await runScan(sb);
+    assert.equal((await getJson(sb, '/api/library')).tracks.length, 0);
+  } finally { sb.cleanup(); }
+});
+
+test('native: scan never duplicates a track yt-dlp already downloaded', async () => {
+  const file = '/storage/emulated/0/Download/Spinity/audio/abc123.mp3';
+  const sb = makeSandbox({
+    native: true,
+    db: {
+      user: { name: 'You' }, likedIds: [], playlists: [],
+      tracks: [{ id: 'yt_abc123', title: 'Centuries', artist: 'Fall Out Boy', durationSec: 200, file, source: 'youtube' }]
+    },
+    bridge: { files: [{ path: file, name: 'abc123.mp3', size: 7, mtime: 9 }], meta: [] }
+  });
+  try {
+    await runScan(sb);
+    const lib = await getJson(sb, '/api/library');
+    assert.equal(lib.tracks.length, 1);
+    assert.equal(lib.tracks[0].id, 'yt_abc123'); // keeps its richer metadata
+  } finally { sb.cleanup(); }
+});
+
+test('native: settings API exposes state, persists options and imports', async () => {
+  const sb = makeSandbox({ native: true, bridge: { importCount: 2 } });
+  try {
+    const st = sb.window.spinitySettings.state();
+    assert.equal(st.options.music, true);
+    assert.equal(st.options.downloads, false);
+    assert.equal(st.options.autoScan, true);
+    assert.equal(st.roots.audio, '/storage/emulated/0/Download/Spinity/audio');
+
+    sb.window.spinitySettings.setOption('music', false);
+    sb.window.spinitySettings.setOption('downloads', true);
+    const saved = JSON.parse(sb.localStorage.getItem('spinity-native:scan:v1'));
+    assert.equal(saved.options.music, false);
+    assert.equal(saved.options.downloads, true);
+
+    // toggling triggers a rescan (the second toggle lands while the first
+    // scan still runs, so settle it, then rescan explicitly)
+    await new Promise((r) => setTimeout(r, 20));
+    await runScan(sb);
+    const scans = sb.bridgeCalls.filter((c) => c.method === 'scanAudio');
+    assert.equal(scans[scans.length - 1].folders.join(','), 'audio,downloads');
+
+    await sb.window.spinitySettings.importAudio();
+    assert.ok(sb.bridgeCalls.some((c) => c.method === 'importAudio'));
+
+    const refreshed = await sb.window.spinitySettings.refresh();
+    assert.equal(refreshed.engine.available, false); // default fake: no engine
+    assert.equal(refreshed.engine.termuxInstalled, true);
   } finally { sb.cleanup(); }
 });
 
@@ -211,6 +436,7 @@ test('browser: native.js is a no-op outside the APK', async () => {
     assert.equal(sb.window.fetch, sb.origFetch); // fetch not wrapped
     assert.equal(sb.window.spinityStreamSrc({ id: 'x' }), '/api/stream?id=x');
     assert.equal(sb.window.spinityDownloadHref({ id: 'x' }), '/api/download?id=x');
+    assert.equal(sb.window.spinitySettings, undefined);
     assert.equal(sb.execs.length, 0);
   } finally { sb.cleanup(); }
 });

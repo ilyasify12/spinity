@@ -10,8 +10,8 @@ server/.env
 !server/dist/
 !server/dist/**
 *.tsbuildinfo
-# stray nested copy
-spinity/
+# stray nested copy (root-anchored: must not match java/com/spinity/)
+/spinity/
 # local scratch (test harnesses, installer probes, build logs)
 .testtmp/
 .freebuff/

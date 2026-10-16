@@ -5,8 +5,7 @@ wrapped in a Capacitor shell under `mobile/`. Two ways to run it:
 
 - **Browser / PWA** (already working): open `http://<your-pc-ip>:8901/player`
   from the desktop app's *Settings → Phone*, or Add to Home Screen.
-- **APK** (this folder): a real app icon that also works **away from the PC**,
-  downloading music on the phone itself with yt-dlp.
+- **APK** (this folder): a real app icon that also works **away from the PC**.
 
 ## What the APK adds over the PWA
 
@@ -17,22 +16,48 @@ answers every `/api/...` call locally:
 | Endpoint | Inside the APK |
 | --- | --- |
 | library, likes, playlists, auth | localStorage on the phone |
-| stream / playback | the mp3s downloaded to `Download/Spinity/audio` |
-| ytsearch, save | **yt-dlp, run through Termux** (search + download + mp3 + cover art) |
+| stream / playback | files on disk: app downloads **plus any music folder on the phone** |
+| ytsearch, save | **yt-dlp bundled in the APK** (python + ffmpeg inside `YtDlpEngine`); Termux is an optional fallback |
 | lyrics | lrclib.net, straight from the phone |
 | probe (codec tag) | not available on the phone (needs ffprobe server-side) |
 
 In a browser this file is inert — the same player keeps talking to the desktop
 server, so nothing above changes for the desktop/PWA use.
 
-## One-time phone setup (Termux)
+## Your music, on the phone
 
-The APK doesn't ship yt-dlp: YouTube changes constantly and a bundled copy
-would rot. Instead the app drives **Termux** (a real Linux userland for
-Android), so yt-dlp stays a single `pip` command away from up to date.
+The app scans on-device folders and merges everything into the Library — no
+setup:
 
-Install **Termux from F-Droid** (the Play Store build is abandoned), then run,
-once:
+- `Download/Spinity/audio` — songs downloaded inside the app (always scanned).
+- `Music/` — the phone's own music folder (on by default).
+- `Download/` — everything with an audio extension (off by default).
+
+Copy songs into any of those with a file manager and they show up in the
+Library — with the **real cover art embedded in each file** (read from the
+file's tags via `MediaMetadataRetriever`, cached under
+`Download/Spinity/covers/`), never a guessed thumbnail. Deleting a file removes
+it from the Library on the next scan.
+
+The **Settings** screen in the app (gear icon, top right) has the local-files
+switches (which folders, auto-scan on launch), **Add music files…** (imports
+through the system picker into `Download/Spinity/audio`), engine status and
+cache clearing.
+
+## YouTube search & downloads: built in
+
+The APK bundles yt-dlp itself — `io.github.junkfood02.youtubedl-android`
+(python + yt-dlp + ffmpeg, all inside the APK, `arm64-v8a`). First launch
+unpacks it once in the background (a few seconds); after that search and
+downloads work with **zero setup: no Termux, no root, no terminal**. The
+Settings screen shows the engine state and has an **Update engine** button
+(yt-dlp rots as YouTube changes; updating keeps it fresh).
+
+### Termux fallback (optional, power users)
+
+If the bundled engine ever cannot run (very old Android, exotic storage
+restrictions), the app can drive **Termux** instead. Install **Termux from
+F-Droid** (the Play Store build is abandoned), then run, once:
 
 ```sh
 termux-setup-storage
@@ -44,10 +69,9 @@ echo "allow-external-apps=true" >> ~/.termux/termux.properties
 termux-reload-settings
 ```
 
-The app shows this same list (with a Copy button) the first time it needs it —
-open the app and tap **Set up** when the panel appears. Then tap **Allow file
-access** and give Spinity "All files" access (needed to read what yt-dlp
-writes into shared storage), and **Check again**.
+The app shows this same list (with a Copy button) when it needs it — the panel
+only appears when both engines are unavailable. Then tap **Allow file access**
+and give Spinity "All files" access, and **Check again**.
 
 ## Building the APK
 
@@ -70,7 +94,9 @@ cd android
 
 The APK is debug-signed: fine for sideloading, not for the Play Store.
 `MANAGE_EXTERNAL_STORAGE` ("All files") is likewise not Play-Store-fine — it
-is the pragmatic permission for a personal, sideloaded music app.
+is the pragmatic permission for a personal, sideloaded music app. The build
+ships `arm64-v8a` only (every phone since ~2018); add `armeabi-v7a` in
+`android/app/build.gradle` for very old devices.
 
 ## Layout
 
@@ -79,18 +105,22 @@ mobile/
   capacitor.config.json      appId com.spinity.player, webDir ../website/player
   android/                   the generated Android project (committed)
     app/src/main/java/com/spinity/player/
-      MainActivity.java        registers the bridge plugin
-      TermuxBridgePlugin.java  status / requestFilesAccess / openTermux / exec
+      MainActivity.java        registers the bridge plugins, kicks off the engine unpack
+      SpinityBridgePlugin.java scan folders / import files / engine methods
+      YtDlpEngine.java         bundled yt-dlp: init, search, download, update
+      TermuxBridgePlugin.java  Termux fallback: status / requestFilesAccess / openTermux / exec
 website/player/native.js     the local /api implementation (tested in tests/nativeShim.test.cjs)
 ```
 
 ## How a download flows
 
-1. Search in the app → `/api/ytsearch` → new job → Termux runs
-   `yt-dlp -J --flat-playlist "ytsearch12:..."` → writes the JSON into
-   `Download/Spinity/jobs/`.
-2. Tap **Save** → `/api/save` → Termux runs
-   `yt-dlp -x --audio-format mp3 --embed-thumbnail` for that video.
-3. `native.js` polls the job's `.code` marker every 2 s; when it lands (0 =
-   success) the mp3 is added to the phone library and appears in the app.
-   Downloads survive closing the app — the next launch finishes the job.
+1. Search in the app → `/api/ytsearch` → the bundled engine runs
+   `yt-dlp -J --flat-playlist "ytsearch12:..."` in-process and returns the
+   results (the Termux route writes a job file instead, when it is the engine
+   in use).
+2. Tap **Save** → `/api/save` → the engine downloads
+   `yt-dlp -x --audio-format mp3 --embed-thumbnail` for that video into
+   `Download/Spinity/audio/<videoId>.mp3`; native.js polls the job for
+   progress and adds the track to the phone library when it lands.
+3. The first run of either engine unpacks in the background; search waits a
+   moment for it and says so in Settings.

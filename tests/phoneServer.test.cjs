@@ -73,11 +73,14 @@ test('starts the real server, serves the player and the library, then stops',{ti
 
 test('restarts on the same port once the old child is gone',{timeout:40000},async()=>{
   await waitPortFree(8903)
-  const again=await phone.startPhoneServer()
-  assert.equal(again.running,true)
-  assert.equal(again.error,null)
-  phone.stopPhoneServer()
-  await waitPortFree(8903)
+  try {
+    const again=await phone.startPhoneServer()
+    assert.equal(again.running,true)
+    assert.equal(again.error,null)
+  } finally {
+    phone.stopPhoneServer()
+    await waitPortFree(8903)
+  }
 })
 
 test('a busy port is reported as an error instead of a fake success',{timeout:40000},async()=>{

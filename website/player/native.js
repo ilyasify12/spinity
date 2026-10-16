@@ -5,8 +5,10 @@
    script and answers every same-origin '/api/...' request itself:
 
      library / liked / playlists / auth  -> localStorage
-     stream bytes (waveform) + audio.src -> downloaded files on disk
-     ytsearch / save (search + download) -> yt-dlp, executed through Termux
+     stream bytes (waveform) + audio.src -> files on disk (downloads + any
+                                            music folder on the phone)
+     ytsearch / save (search + download) -> yt-dlp bundled inside the APK;
+                                            the Termux route stays as a fallback
      lyrics                              -> lrclib.net (direct)
      probe                               -> skipped (no ffmpeg on the phone side)
 
@@ -50,10 +52,12 @@
   }
   var FS = plugin('Filesystem');
   var TERMUX = plugin('TermuxBridge');
+  var BRIDGE = plugin('SpinityBridge');
 
   var EXT = 'EXTERNAL_STORAGE';                 // Directory.ExternalStorage
+  var ABS_EXT = '/storage/emulated/0';          // the same, absolute
   var ROOT = 'Download/Spinity';                // folder shared with Termux
-  var ABS_ROOT = '/storage/emulated/0/' + ROOT; // same, absolute, for convertFileSrc
+  var ABS_ROOT = ABS_EXT + '/' + ROOT;          // same, absolute, for convertFileSrc
   var T_BASE = '$HOME/storage/downloads/Spinity'; // the same folder, as Termux sees it
   var LOOKS_READY = { termuxInstalled: false, filesAccess: false };
 
@@ -230,10 +234,130 @@
 
   function pollJobs() {
     var active = jobs.filter(function (j) { return !j.doneAt; });
-    active.forEach(function (j) { pollOne(j).catch(function () {}); });
+    active.forEach(function (j) {
+      var p = j.engine === 'embedded' ? pollEmbedded(j) : pollOne(j);
+      p.catch(function () {});
+    });
     if (active.length) cleanupJobs(); else if (jobs.length) cleanupJobs();
   }
   setInterval(pollJobs, 2000);
+
+  /* ---- bundled yt-dlp engine (no Termux needed) ---------------------------- */
+  var engineCache = { ts: 0, st: null };
+  var searchMemo = {};
+
+  async function engineState(force) {
+    if (engineCache.st && !force && Date.now() - engineCache.ts < 5000) return engineCache.st;
+    var st;
+    try { st = await BRIDGE.call('ytdlpAvailable', {}); }
+    catch (e) { st = { available: false, initializing: false, error: msg(e) }; }
+    engineCache = { ts: Date.now(), st: st };
+    return st;
+  }
+
+  // Search via the engine bundled inside the APK; waits for the one-time
+  // unpack, falls back to Termux, then to the setup panel.
+  async function searchViaEngine(q, limit) {
+    var deadline = Date.now() + 45 * 1000;
+    for (;;) {
+      var st = await engineState(true);
+      if (st.available) {
+        var raw = await BRIDGE.call('ytdlpSearch', { q: q, limit: limit || 12 });
+        return mapSearchResults(raw);
+      }
+      if (!st.initializing || Date.now() > deadline) {
+        var rdy = await ensureReady();
+        if (rdy.ok) return termuxSearch(q);
+        var why = st.error
+          ? 'The built-in YouTube engine could not start on this phone (' + st.error + ')'
+          : 'YouTube search needs the built-in engine (still starting) or the Termux setup';
+        ensureSetupOpen(why);
+        throw new Error(why);
+      }
+      await sleep(1500);
+    }
+  }
+
+  async function engineSearch(q, limit) {
+    var memo = searchMemo[q];
+    if (memo && Date.now() - memo.ts < 10 * 60 * 1000) return memo.res;
+    var res = await searchViaEngine(q, limit);
+    searchMemo[q] = { ts: Date.now(), res: res };
+    return res;
+  }
+
+  // The old Termux route, kept as the fallback engine.
+  async function termuxSearch(q) {
+    var job = null;
+    for (var j = 0; j < jobs.length; j++) {
+      if (jobs[j].kind === 'search' && jobs[j].q === q && !jobs[j].doneAt) job = jobs[j];
+      if (jobs[j].kind === 'search' && jobs[j].q === q && jobs[j].doneAt && jobs[j].result && Date.now() - jobs[j].doneAt < 10 * 60 * 1000) {
+        return jobs[j].result;
+      }
+    }
+    if (!job) job = startSearch(q);
+    var deadline = Date.now() + 90 * 1000;
+    while (Date.now() < deadline) {
+      if (job.result) return job.result;
+      if (job.error) throw new Error(job.error);
+      if (job.doneAt) break;
+      await sleep(750);
+    }
+    throw new Error(job.error || 'YouTube search timed out — is Termux set up and running?');
+  }
+
+  async function startEmbeddedDownload(t) {
+    var videoId = String(t.id).replace(/^yt_/, '');
+    var res = await BRIDGE.call('ytdlpDownload', { videoId: videoId });
+    var job = {
+      id: 'd' + Date.now().toString(36),
+      kind: 'download',
+      engine: 'embedded',
+      embedId: res && res.jobId,
+      videoId: videoId,
+      track: t,
+      ts: Date.now()
+    };
+    jobs.push(job);
+    saveJobs();
+    return job;
+  }
+
+  async function pollEmbedded(job) {
+    if (!job.embedId) return;
+    var st;
+    try { st = await BRIDGE.call('ytdlpJob', { jobId: job.embedId }); }
+    catch (e) { return; } // transient bridge hiccup: try again on the next tick
+    if (st.state === 'queued' || st.state === 'downloading') {
+      job.progress = st.progress || 0;
+      return;
+    }
+    if (st.state === 'done') {
+      var t = job.track || {};
+      if (!findTrack('yt_' + job.videoId)) {
+        db.tracks.unshift({
+          id: 'yt_' + job.videoId,
+          title: t.title || 'Unknown',
+          artist: t.artist || 'YouTube',
+          durationSec: t.durationSec || 0,
+          thumbnail: t.thumbnail || '',
+          file: st.path || (ABS_ROOT + '/audio/' + job.videoId + '.mp3'),
+          source: 'youtube',
+          downloadedAt: Date.now()
+        });
+        saveDb();
+        toast('Saved to library ✓');
+      }
+      job.doneAt = Date.now();
+      saveJobs();
+      if (typeof window.boot === 'function') { try { window.boot(); } catch (e) {} }
+    } else if (st.state === 'error' || st.state === 'unknown') {
+      job.error = st.error || 'download failed';
+      job.doneAt = Date.now();
+      saveJobs();
+      toast('Download failed: ' + job.error, true);
+    }
+  }
 
   /* ---- readiness (Termux + file access) ----------------------------------- */
   var readyCache = null;
@@ -248,8 +372,13 @@
       : !LOOKS_READY.filesAccess ? 'Spinity needs "All files" access'
       : '';
     readyCache = { ts: Date.now(), ok: !why, why: why };
-    if (why && !setupDismissed()) openSetup(why);
     return readyCache;
+  }
+
+  // The setup panel only appears when the user actually needs it (both
+  // engines unavailable) — never as a launch-time nag.
+  function ensureSetupOpen(reason) {
+    if (!setupDismissed()) openSetup(reason);
   }
 
   /* ---- lyrics (lrclib, straight from the phone) ---------------------------- */
@@ -297,6 +426,229 @@
     if (out.synced || out.plain) { try { localStorage.setItem(key, JSON.stringify(out)); } catch (e) {} }
     return jsonRes(out);
   }
+
+  /* ---- local music folders -------------------------------------------------- */
+  // Songs the user copies onto the phone (or downloads with any other app)
+  // are picked up here and merged into the library — no server, no yt-dlp.
+  // Tag data + embedded covers come from the native scan; this side keeps a
+  // path -> "mtime:size" cache so rescans only read changed files.
+  var SCAN_KEY = 'spinity-native:scan:v1';
+  var scan = {
+    options: { music: true, downloads: false, autoScan: true },
+    cache: {},                              // path -> "mtime:size"
+    meta: {},                               // path -> { title, artist, album, durationSec, cover }
+    roots: { audio: ABS_ROOT + '/audio', music: ABS_EXT + '/Music', downloads: ABS_EXT + '/Download' },
+    lastScan: 0,
+    lastCount: 0,
+    needPermission: false,
+    busy: false
+  };
+  try {
+    var savedScan = JSON.parse(localStorage.getItem(SCAN_KEY) || 'null');
+    if (savedScan && typeof savedScan === 'object') {
+      if (savedScan.options) {
+        ['music', 'downloads', 'autoScan'].forEach(function (k) {
+          if (typeof savedScan.options[k] === 'boolean') scan.options[k] = savedScan.options[k];
+        });
+      }
+      scan.cache = savedScan.cache || {};
+      scan.meta = savedScan.meta || {};
+      if (savedScan.roots) scan.roots = savedScan.roots;
+      scan.lastScan = savedScan.lastScan || 0;
+      scan.lastCount = savedScan.lastCount || 0;
+    }
+  } catch (e) { /* first run */ }
+  function saveScan() {
+    try { localStorage.setItem(SCAN_KEY, JSON.stringify(scan)); } catch (e) {}
+  }
+
+  function h32(s) {
+    var h = 5381, i = s.length;
+    while (i > 0) h = (h * 33) ^ s.charCodeAt(--i);
+    return (h >>> 0).toString(36);
+  }
+  function prettyName(n) {
+    return String(n || '').replace(/\.[a-z0-9]{2,5}$/i, '').replace(/_+/g, ' ').replace(/\s{2,}/g, ' ').trim() || 'Unknown';
+  }
+
+  var permNagShown = false;
+
+  async function refreshLocalTracks() {
+    var res;
+    try {
+      res = await BRIDGE.call('scanAudio', {
+        folders: ['audio']
+          .concat(scan.options.music ? ['music'] : [])
+          .concat(scan.options.downloads ? ['downloads'] : []),
+        knownJson: JSON.stringify(scan.cache)
+      });
+    } catch (e) {
+      return { ok: false, error: msg(e) };
+    }
+    if (res && res.roots) scan.roots = res.roots;
+    scan.needPermission = !!(res && res.needPermission);
+    if (scan.needPermission) {
+      saveScan();
+      if (!permNagShown) {
+        permNagShown = true;
+        toast('Allow file access so Spinity can see the music on your phone', true);
+      }
+      return { ok: false, needPermission: true };
+    }
+
+    var files = (res && res.files) || [];
+    var freshMeta = (res && res.meta) || [];
+    var freshCache = {};
+    var meta = {};
+    var i, k;
+    for (i = 0; i < files.length; i++) {
+      var f = files[i];
+      freshCache[f.path] = f.mtime + ':' + f.size;
+      var m = null;
+      for (k = 0; k < freshMeta.length; k++) {
+        if (freshMeta[k].path === f.path) { m = freshMeta[k]; break; }
+      }
+      meta[f.path] = m || scan.meta[f.path] || null;
+    }
+    scan.cache = freshCache;
+    scan.meta = meta;
+
+    // Merge: yt-dlp downloads keep their rich metadata; every other audio
+    // file on the phone becomes a local track (rebuilt each scan, so files
+    // deleted in a file manager disappear from the library too).
+    var prevLocal = {};
+    var kept = [];
+    var seenFiles = {};
+    db.tracks.forEach(function (t) {
+      if (t.source === 'local') { prevLocal[t.id] = true; return; }
+      if (t.file) seenFiles[String(t.file).toLowerCase()] = true;
+      kept.push(t);
+    });
+
+    var locals = [];
+    var paths = Object.keys(freshCache);
+    for (i = 0; i < paths.length; i++) {
+      var path = paths[i];
+      if (seenFiles[path.toLowerCase()]) continue;
+      var tm = meta[path] || {};
+      locals.push({
+        id: 'loc_' + h32(path),
+        title: tm.title || prettyName(path.split('/').pop()),
+        artist: tm.artist || 'Unknown artist',
+        album: tm.album || '',
+        durationSec: tm.durationSec || 0,
+        thumbnail: tm.cover ? Cap.convertFileSrc(tm.cover) : '',
+        file: path,
+        source: 'local'
+      });
+    }
+    locals.sort(function (a, b) { return a.title.localeCompare(b.title); });
+    var added = 0;
+    locals.forEach(function (t) { if (!prevLocal[t.id]) added++; });
+
+    db.tracks = locals.concat(kept);
+    saveDb();
+    scan.lastScan = Date.now();
+    scan.lastCount = locals.length;
+    saveScan();
+    return { ok: true, added: added, total: locals.length };
+  }
+
+  async function scanLocal(force) {
+    if (scan.busy) return null;
+    if (!force && !scan.options.autoScan) return null;
+    scan.busy = true;
+    var r = null;
+    try { r = await refreshLocalTracks(); }
+    finally { scan.busy = false; }
+    if (r && r.ok && r.added) {
+      toast(r.added + ' new song' + (r.added === 1 ? '' : 's') + ' found on your phone ✓');
+      if (typeof window.boot === 'function') { try { window.boot(); } catch (e) {} }
+    }
+    return r;
+  }
+
+  /* ---- settings screen API (used by the player's Settings view) ------------ */
+  var engineInfo = { available: false, initializing: false, error: null, version: null };
+  var termuxInfo = { termuxInstalled: false, filesAccess: false };
+
+  async function refreshStatus() {
+    var st = null;
+    try { st = await BRIDGE.call('ytdlpAvailable', {}); } catch (e) { st = null; }
+    engineInfo = st || { available: false, initializing: false, error: msg(e) };
+    engineCache = { ts: Date.now(), st: engineInfo };
+    try { termuxInfo = await TERMUX.call('status', {}); } catch (e) { termuxInfo = {}; }
+    LOOKS_READY = { termuxInstalled: !!termuxInfo.termuxInstalled, filesAccess: !!termuxInfo.filesAccess };
+    return engineInfo;
+  }
+
+  window.spinitySettings = {
+    state: function () {
+      return {
+        options: { music: scan.options.music, downloads: scan.options.downloads, autoScan: scan.options.autoScan },
+        scanning: scan.busy,
+        needPermission: scan.needPermission,
+        lastScan: scan.lastScan,
+        count: scan.lastCount,
+        roots: scan.roots,
+        engine: {
+          available: !!engineInfo.available,
+          initializing: !!engineInfo.initializing,
+          error: engineInfo.error || '',
+          version: engineInfo.version || '',
+          termuxInstalled: !!(termuxInfo && termuxInfo.termuxInstalled),
+          filesAccess: !!(termuxInfo && termuxInfo.filesAccess)
+        }
+      };
+    },
+    refresh: async function () { await refreshStatus(); return window.spinitySettings.state(); },
+    scanNow: function () { return scanLocal(true); },
+    importAudio: async function () {
+      var r = null;
+      try { r = await BRIDGE.call('importAudio', {}); }
+      catch (e) { toast('Import failed: ' + msg(e), true); return 0; }
+      var n = (r && r.count) || 0;
+      if (n) {
+        toast(n + ' file' + (n === 1 ? '' : 's') + ' imported — scanning…');
+        await scanLocal(true);
+      } else {
+        toast('Nothing was imported');
+      }
+      return n;
+    },
+    setOption: function (k, v) {
+      if (Object.prototype.hasOwnProperty.call(scan.options, k)) {
+        scan.options[k] = !!v;
+        saveScan();
+        if (k === 'music' || k === 'downloads') scanLocal(true).catch(function () {});
+      }
+      return window.spinitySettings.state();
+    },
+    requestFilesAccess: function () { return TERMUX.call('requestFilesAccess', {}); },
+    openSetup: function () { openSetup(''); },
+    updateEngine: async function () {
+      try {
+        var r = await BRIDGE.call('ytdlpUpdate', {});
+        await refreshStatus();
+        toast(r && r.status === 'ALREADY_UP_TO_DATE' ? 'Engine is already up to date ✓' : 'Engine updated ✓');
+        return true;
+      } catch (e) {
+        toast('Update failed: ' + msg(e), true);
+        return false;
+      }
+    },
+    clearLyrics: function () {
+      try {
+        var keys = [];
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf('spinity-native:lrc:') === 0) keys.push(k);
+        }
+        keys.forEach(function (k) { localStorage.removeItem(k); });
+      } catch (e) {}
+    },
+    clearWaves: function () { try { localStorage.removeItem('spinity-web:waves'); } catch (e) {} }
+  };
 
   /* ---- the /api router ---------------------------------------------------- */
   async function handleApi(url, init) {
@@ -358,33 +710,39 @@
     if (m === 'GET /api/ytsearch') {
       var query = String(q.get('q') || '').trim();
       if (!query) return jsonRes([]);
-      var ready = await ensureReady();
-      if (!ready.ok) return jsonRes({ error: ready.why }, 503);
-      var job = null;
-      for (var j = 0; j < jobs.length; j++) {
-        if (jobs[j].kind === 'search' && jobs[j].q === query && !jobs[j].doneAt) job = jobs[j];
-        if (jobs[j].kind === 'search' && jobs[j].q === query && jobs[j].doneAt && jobs[j].result && Date.now() - jobs[j].doneAt < 10 * 60 * 1000) {
-          return jsonRes(jobs[j].result);
-        }
+      try {
+        return jsonRes(await engineSearch(query, 12));
+      } catch (e) {
+        return jsonRes({ error: msg(e) }, 503);
       }
-      if (!job) job = startSearch(query);
-      var deadline = Date.now() + 90 * 1000;
-      while (Date.now() < deadline) {
-        if (job.result) return jsonRes(job.result);
-        if (job.error) return jsonRes({ error: job.error }, 502);
-        if (job.doneAt) break;
-        await sleep(750);
-      }
-      return jsonRes({ error: job.error || 'YouTube search timed out — is Termux set up and running?' }, 504);
     }
     if (m === 'POST /api/save') {
       var saveId = String(body.id || '');
       if (!saveId) return jsonRes({ error: 'missing id' }, 400);
       if (findTrack(saveId)) return jsonRes({ ok: true, existing: true });
+      var busy = jobs.some(function (x) { return x.kind === 'download' && x.track && x.track.id === saveId && !x.doneAt; });
+      if (busy) return jsonRes({ ok: true });
+      var est = await engineState(true);
+      if (est.available) {
+        try { await startEmbeddedDownload(body); return jsonRes({ ok: true }); }
+        catch (e) { return jsonRes({ error: msg(e) }, 503); }
+      }
+      if (est.initializing) {
+        // First run: the engine is unpacking. Give it a moment before falling
+        // back to the Termux route.
+        for (var w = 0; w < 20; w++) {
+          await sleep(1500);
+          est = await engineState(true);
+          if (est.available) {
+            try { await startEmbeddedDownload(body); return jsonRes({ ok: true }); }
+            catch (e) { break; }
+          }
+          if (!est.initializing) break;
+        }
+      }
       var rdy = await ensureReady();
-      if (!rdy.ok) return jsonRes({ error: rdy.why }, 503);
-      var inFlight = jobs.some(function (x) { return x.kind === 'download' && x.track && x.track.id === saveId && !x.doneAt; });
-      if (!inFlight) startDownload(body);
+      if (!rdy.ok) { ensureSetupOpen(rdy.why); return jsonRes({ error: rdy.why }, 503); }
+      startDownload(body);
       return jsonRes({ ok: true });
     }
     if (m === 'GET /api/lyrics') return apiLyrics(String(q.get('id') || ''));
@@ -393,7 +751,8 @@
       t = findTrack(String(q.get('id') || ''));
       if (!t || !t.file) return new Response(null, { status: 404 });
       try {
-        var rel = t.file.indexOf(ROOT) >= 0 ? t.file.slice(t.file.indexOf(ROOT)) : t.file;
+        var rel = t.file.indexOf(ABS_EXT + '/') === 0 ? t.file.slice(ABS_EXT.length + 1)
+          : (t.file.indexOf(ROOT) >= 0 ? t.file.slice(t.file.indexOf(ROOT)) : t.file);
         var fres = await FS.call('readFile', { path: rel, directory: EXT });
         var bytes = b64ToBytes(fres.data);
         return new Response(bytes, {
@@ -457,9 +816,9 @@
       'position:fixed;inset:0;z-index:9000;background:rgba(4,5,9,.82);display:grid;place-items:center;padding:18px;font-family:inherit;');
     wrap.innerHTML =
       '<div style="max-width:520px;width:100%;max-height:88vh;overflow:auto;background:#0d1017;border:1px solid #232a3d;border-radius:16px;padding:22px;color:#f2f4fc">' +
-      '<div style="font-weight:700;font-size:18px;margin-bottom:4px">Phone setup</div>' +
+      '<div style="font-weight:700;font-size:18px;margin-bottom:4px">YouTube downloads</div>' +
       '<div id="sp-native-why" style="color:#ffb27d;font-size:13px;margin-bottom:12px"></div>' +
-      '<div style="color:#a4abc4;font-size:13px;line-height:1.55;margin-bottom:12px">Spinity downloads songs on the phone with <b>yt-dlp</b>, which runs inside <b>Termux</b>. This is a one-time setup.</div>' +
+      '<div style="color:#a4abc4;font-size:13px;line-height:1.55;margin-bottom:12px">Spinity plays YouTube songs with the <b>engine built into the app</b> — normally there is nothing to set up. If the built-in engine cannot run on this phone, <b>Termux</b> is the backup route: a one-time terminal setup that keeps yt-dlp separate from the app.</div>' +
       '<ol style="color:#f2f4fc;font-size:13px;line-height:1.7;margin:0 0 12px 18px">' +
       '<li>Install <b>Termux</b> (from F-Droid).</li>' +
       '<li>Open it once, then tap <b>Copy setup commands</b> here, paste in Termux and run them.</li>' +
@@ -530,6 +889,19 @@
   }
 
   window.addEventListener('load', function () {
-    setTimeout(function () { ensureReady().catch(function () {}); }, 1500);
+    setTimeout(function () {
+      refreshStatus().catch(function () {});
+      // Pick up anything the user copied onto the phone since last launch.
+      scanLocal(false).catch(function () {});
+    }, 1200);
+  });
+
+  // Back from the background: cheap rescan for files added while away.
+  var lastResumeAt = 0;
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible') return;
+    if (Date.now() - lastResumeAt < 15000) return;
+    lastResumeAt = Date.now();
+    scanLocal(false).catch(function () {});
   });
 })();

@@ -79,36 +79,45 @@ export function startPhoneServer(): Promise<PhoneServerStatus> {
         resolve(phoneStatus())
       }
     }
+    let proc: ChildProcess
     try {
-      child = spawn(process.execPath, [script, String(PORT)], {
+      proc = spawn(process.execPath, [script, String(PORT)], {
         env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true
       })
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err)
-      child = null
       finish()
       return
     }
+    child = proc
+    // Every handler below checks that `proc` is still the current child: a
+    // killed server's exit event can arrive after a restart has already
+    // spawned its replacement, and it must not clobber that replacement.
     const onOut = (chunk: Buffer): void => {
+      if (child !== proc) return
       const text = chunk.toString()
       for (const line of text.split(/\r?\n/)) if (line.trim()) logTail.push(line.trim())
       logTail = logTail.slice(-20)
       // The server prints its listening URLs on startup — that is "ready".
       if (/listening|http:\/\//i.test(text)) finish()
     }
-    child.stdout?.on('data', onOut)
-    child.stderr?.on('data', onOut)
-    child.on('error', (err) => {
-      lastError = err.message
-      child = null
+    proc.stdout?.on('data', onOut)
+    proc.stderr?.on('data', onOut)
+    proc.on('error', (err) => {
+      if (child === proc) {
+        lastError = err.message
+        child = null
+      }
       finish()
     })
-    child.on('exit', (code) => {
-      child = null
-      if (code && !lastError) {
-        lastError = `web player server exited (code ${code})${logTail.length ? ' — ' + logTail[logTail.length - 1] : ''}`
+    proc.on('exit', (code) => {
+      if (child === proc) {
+        child = null
+        if (code && !lastError) {
+          lastError = `web player server exited (code ${code})${logTail.length ? ' — ' + logTail[logTail.length - 1] : ''}`
+        }
       }
       finish()
     })

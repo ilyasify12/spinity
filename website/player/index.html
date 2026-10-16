@@ -63,6 +63,18 @@ input, select { font-family:inherit; font-size:inherit; }
 .sp-center { grid-area:center; display:flex; flex-direction:column; min-width:0; min-height:0; background:var(--bg-elev); border-radius:var(--radius); overflow:hidden; }
 .sp-topbar { height:var(--topbar-h); display:flex; align-items:center; gap:8px; padding:0 8px 0 24px; flex:none; }
 .sp-nav-arrow { width:32px; height:32px; border-radius:50%; background:rgba(0,0,0,.7); color:var(--text-dim); display:grid; place-items:center; }
+.sp-gear { width:32px; height:32px; border-radius:50%; background:var(--bg-elev-2); color:var(--text-dim); display:grid; place-items:center; flex:none; }
+.sp-gear:hover { color:var(--text); background:var(--bg-elev-3); }
+.set-sec { margin:24px 0 10px; font-size:17px; font-weight:800; letter-spacing:-.3px; }
+.set-row { display:flex; align-items:center; gap:12px; padding:12px 14px; border:1px solid var(--bg-elev-3); border-radius:12px; background:var(--bg-elev); margin-bottom:8px; }
+.set-row .set-main { flex:1; min-width:0; }
+.set-row .set-main b { font-size:13.5px; font-weight:700; color:var(--text); display:block; }
+.set-row .set-main span { display:block; font-size:12px; color:var(--text-dim); margin-top:3px; word-break:break-all; }
+.set-tog { width:44px; height:26px; border-radius:13px; background:var(--bg-elev-3); position:relative; flex:0 0 auto; transition:background .15s; padding:0; }
+.set-tog::after { content:''; position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:#999; transition:left .15s, background .15s; }
+.set-tog.on { background:var(--accent); }
+.set-tog.on::after { left:21px; background:#14100a; }
+.set-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:12px 0 4px; }
 .sp-home-btn { width:48px; height:48px; border-radius:50%; background:var(--bg-elev-2); color:var(--text-dim); display:grid; place-items:center; flex:none; font-size:19px; }
 .sp-home-btn:hover, .sp-home-btn.active { color:var(--text); transform:scale(1.04); }
 .sp-search-pill { display:flex; align-items:center; gap:10px; background:var(--bg-elev-2); border:1px solid transparent; border-radius:24px; padding:0 16px; height:48px; width:100%; max-width:480px; color:var(--text-dim); }
@@ -427,7 +439,8 @@ const IC = {
   logout: (s = 15) => svgW('<path d="M9 21H5a1 1 0 01-1-1V4a1 1 0 011-1h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" />', s),
   dl: (s = 15) => svgW('<path d="M12 3v11" /><path d="M7 9.5l5 5 5-5" /><path d="M5 20h14" />', s),
   chevD: (s = 20) => svgW('<path d="M6 9l6 6 6-6" />', s),
-  install: (s = 15) => svgW('<path d="M12 3v11" /><path d="M7 9.5l5 5 5-5" /><path d="M4 20h16" />', s)
+  install: (s = 15) => svgW('<path d="M12 3v11" /><path d="M7 9.5l5 5 5-5" /><path d="M4 20h16" />', s),
+  gear: (s = 17) => svgW('<circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 00.33 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.33 1.7 1.7 0 00-1 1.55V21a2 2 0 11-4 0v-.09A1.7 1.7 0 009 19.36a1.7 1.7 0 00-1.87.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.7 1.7 0 00.33-1.87 1.7 1.7 0 00-1.55-1H3a2 2 0 110-4h.09A1.7 1.7 0 004.6 9a1.7 1.7 0 00-.33-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06a1.7 1.7 0 001.87.33H9a1.7 1.7 0 001-1.55V3a2 2 0 114 0v.09a1.7 1.7 0 001 1.55 1.7 1.7 0 001.87-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.7 1.7 0 00-.33 1.87V9a1.7 1.7 0 001.55 1H21a2 2 0 110 4h-.09a1.7 1.7 0 00-1.55 1z" />', s)
 };
 
 function toast(msg, err = false) {
@@ -527,7 +540,7 @@ function shell(inner) {
       <button class="sp-nav-arrow" id="nav-fwd" title="Forward">${IC.chevR(15)}</button>
       <button class="sp-home-btn${view === 'home' ? ' active' : ''}" data-view="home" title="Home">${IC.home(22)}</button>
       <div class="sp-search-pill">${IC.search(17)}<input id="q-top" placeholder="What do you want to play?" value="${esc(query)}" /></div>
-      <div class="sp-topbar-right"><button class="avatar" id="me-avatar" title="Account">${esc((me.user.name || '?')[0].toUpperCase())}</button></div>
+      <div class="sp-topbar-right">${window.__SPINITY_NATIVE ? `<button class="sp-gear" id="btn-settings" title="Settings" aria-label="Settings">${IC.gear(16)}</button>` : ''}<button class="avatar" id="me-avatar" title="Account">${esc((me.user.name || '?')[0].toUpperCase())}</button></div>
     </div>
     <div class="sp-page" id="main">${inner}</div>
   </div>
@@ -591,6 +604,33 @@ function bindShell() {
   if (meAv) meAv.onclick = (e) => accountMenu(e.currentTarget);
   $('nav-back').onclick = () => history.back();
   $('nav-fwd').onclick = () => history.forward();
+  // ---- Settings (phone app only) ----
+  const gearBtn = $('btn-settings');
+  if (gearBtn) gearBtn.onclick = () => { view = 'settings'; render(); };
+  const gearRow = $('go-settings');
+  if (gearRow) gearRow.onclick = () => { view = 'settings'; render(); };
+  if (view === 'settings' && window.spinitySettings) {
+    const S = window.spinitySettings;
+    document.querySelectorAll('#main [data-opt]').forEach((b) => {
+      b.onclick = () => { S.setOption(b.dataset.opt, !b.classList.contains('on')); render(); };
+    });
+    const sc = $('set-scan');
+    if (sc) sc.onclick = async () => { sc.textContent = 'Scanning…'; await S.scanNow(); render(); toast('Library refreshed ✓'); };
+    const im = $('set-import');
+    if (im) im.onclick = async () => { await S.importAudio(); render(); };
+    const chk = $('set-engine');
+    if (chk) chk.onclick = async () => { await S.refresh(); render(); toast('Status refreshed'); };
+    const upd = $('set-update');
+    if (upd) upd.onclick = async () => { toast('Updating the engine…'); await S.updateEngine(); render(); };
+    const su = $('set-setup');
+    if (su) su.onclick = () => S.openSetup();
+    const pm = $('set-perm');
+    if (pm) pm.onclick = async () => { await S.requestFilesAccess(); toast('Back — then tap "Scan now"'); };
+    const ly = $('set-lyrics');
+    if (ly) ly.onclick = () => { S.clearLyrics(); toast('Lyrics cache cleared'); render(); };
+    const wv = $('set-waves');
+    if (wv) wv.onclick = () => { S.clearWaves(); toast('Waveform cache cleared'); render(); };
+  }
   const createPl = async () => {
     const name = prompt('Playlist name:');
     if (!name || !name.trim()) return;
@@ -642,6 +682,57 @@ function trackRows(list, plId = null) {
 function heroArt(t, big) {
   if (t && t.thumbnail) return `<img src="${esc(t.thumbnail)}" alt="" onerror="this.remove()" />`;
   return big ? `<span class="pl-hero-letter">${esc(((t && t.title) || '?')[0])}</span>` : `<span style="color:var(--text-faint)">${IC.music(20)}</span>`;
+}
+
+function timeAgo(ts) {
+  if (!ts) return 'never';
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + ' min ago';
+  if (s < 86400) return Math.floor(s / 3600) + ' h ago';
+  return Math.floor(s / 86400) + ' days ago';
+}
+
+// Native-only Settings screen: local files, imports, download engine, storage.
+function settingsHtml() {
+  const st = window.spinitySettings.state();
+  const e = st.engine;
+  const engLabel = e.available ? 'Ready' + (e.version ? ' — v' + e.version : '') : e.initializing ? 'Starting up…' : 'Unavailable';
+  const engSub = e.available
+    ? 'Bundled into the app — search and downloads work out of the box.'
+    : e.initializing
+      ? 'One-time unpack of the built-in player. Search works in a moment.'
+      : (e.error || 'No bundled engine in this build.');
+  const localRows = [
+    `<div class="set-row"><span class="set-main"><b>Download/Spinity/audio</b><span>${esc(st.roots.audio || '')}</span></span><span class="set-tog on" style="opacity:.55;pointer-events:none" title="Always on"></span></div>`,
+    `<div class="set-row"><span class="set-main"><b>Music folder</b><span>Your phone's own Music folder${st.roots.music ? ' — ' + esc(st.roots.music) : ''}</span></span><button class="set-tog${st.options.music ? ' on' : ''}" data-opt="music" aria-label="Toggle Music folder"></button></div>`,
+    `<div class="set-row"><span class="set-main"><b>Downloads folder</b><span>Any audio file anywhere in Download</span></span><button class="set-tog${st.options.downloads ? ' on' : ''}" data-opt="downloads" aria-label="Toggle Downloads folder"></button></div>`,
+    `<div class="set-row"><span class="set-main"><b>Scan when Spinity opens</b><span>New songs appear on their own</span></span><button class="set-tog${st.options.autoScan ? ' on' : ''}" data-opt="autoScan" aria-label="Toggle automatic scan"></button></div>`
+  ].join('');
+  return `<div class="page-title">Settings</div>
+    <div class="page-sub">${st.count} local file${st.count === 1 ? '' : 's'} • last scan ${timeAgo(st.lastScan)}</div>
+    ${st.needPermission ? `<div class="set-actions"><button class="btn btn-sm" id="set-perm">${IC.dl(14)} Allow file access</button><span class="hint">Android needs this before Spinity can read your music.</span></div>` : ''}
+    <div class="set-sec">Local files</div>
+    <p class="hint" style="margin:0 0 12px">Anything you copy onto the phone shows up in your Library automatically — with the real cover art embedded in the file. You can also import songs from anywhere on the phone.</p>
+    ${localRows}
+    <div class="set-actions">
+      <button class="btn btn-sm" id="set-scan">${st.scanning ? 'Scanning…' : 'Scan now'}</button>
+      <button class="btn btn-ghost btn-sm" id="set-import">Add music files…</button>
+    </div>
+    <div class="set-sec">YouTube downloads</div>
+    <div class="set-row"><span class="set-main"><b>Built-in engine — ${esc(engLabel)}</b><span>${esc(engSub)}</span></span></div>
+    <div class="set-row"><span class="set-main"><b>Termux route — ${e.termuxInstalled ? 'installed' : 'not used'}</b><span>${e.termuxInstalled ? (e.filesAccess ? 'File access granted. ' : 'Needs file access. ') + 'Backup download route.' : 'Optional backup route if the built-in engine ever stops working.'}</span></span></div>
+    <div class="set-actions">
+      <button class="btn btn-sm" id="set-engine">Check again</button>
+      <button class="btn btn-ghost btn-sm" id="set-update">Update engine</button>
+      <button class="btn btn-ghost btn-sm" id="set-setup">Setup guide</button>
+    </div>
+    <div class="set-sec">Storage</div>
+    <div class="set-row"><span class="set-main"><b>Where downloads go</b><span>${esc(st.roots.audio || 'Download/Spinity/audio')}</span></span></div>
+    <div class="set-actions">
+      <button class="btn btn-ghost btn-sm" id="set-lyrics">Clear lyrics cache</button>
+      <button class="btn btn-ghost btn-sm" id="set-waves">Clear waveform cache</button>
+    </div>`;
 }
 
 function render() {
@@ -720,8 +811,11 @@ function render() {
       ${deferredInstall && !standalone ? `<div style="padding:0 0 14px"><button class="btn btn-sm" id="btn-install">${IC.install(13)} Install app</button> <span class="hint">Adds Spinity to your home screen.</span></div>` : ''}
       <div class="lib-page">
         ${items.map((p) => libRow(p, '')).join('')}
+        ${window.__SPINITY_NATIVE ? `<button class="sp-lib-row" id="go-settings"><span class="sp-lib-art">${IC.gear(22)}</span><span class="sp-lib-meta"><span class="sp-lib-title">Settings</span><br /><span class="sp-lib-sub">Local files, downloads, storage</span></span></button>` : ''}
         <button class="sp-lib-row" id="pl-add2"><span class="sp-lib-art">${IC.plus(22)}</span><span class="sp-lib-meta"><span class="sp-lib-title">New playlist</span><br /><span class="sp-lib-sub">Create an empty playlist</span></span></button>
       </div>`;
+  } else if (view === 'settings' && window.spinitySettings) {
+    inner = settingsHtml();
   }
   $('app').innerHTML = shell(inner);
   bindShell();
