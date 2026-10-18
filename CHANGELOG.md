@@ -1,5 +1,23 @@
 # Spinity Changelog
 
+## 1.4.1 — Search arrives while you're reading, play starts on hover ⚡
+
+**Free-catalogue results appear as they arrive**
+- The **Free to play** section no longer waits for the slowest provider: Deezer and Apple rows paint the moment those catalogues answer (~1 s), the Internet Archive's items fill in behind them, and a small `still looking…` chip marks what is still in flight. Partials merge with the same rules as the final list, so nothing shuffles when the search completes.
+- **Repeat searches survive a restart.** The session result cache (YouTube and free catalogues, 10-minute freshness) is now persisted, so a query you ran before the app was closed renders instantly instead of paying the network again.
+- New tests: per-provider partial events (including *empty providers stay silent*) and merge parity between the partial and final lists.
+
+**Play starts while you are still deciding**
+- **Hover prewarm.** Resting the pointer on a result row starts the expensive part early: a YouTube row resolves its stream URL (seconds cold, then cached ~3 h in the main process), a preview/Archive row starts the write-through cache download, and a radio row resolves its `.pls`. Clicking Play then only waits for the element's first buffer.
+- Concurrent resolves of the same video now share **one** yt-dlp process instead of racing two (hover + click on the same row).
+- Radio stations the Search page shows are resolved quietly right after the channel list lands (three at a time) — the first tune-in skips the playlist round trip.
+
+**Stream protocol**
+- A cache-host server that never sends `Content-Length` (chunked) no longer stalls the response for the full 2.5 s header wait: the protocol starts serving with the first body byte. New chunked-server test.
+
+**yt-dlp**
+- Stream resolution and downloads point yt-dlp at a JavaScript runtime when one is present (yt-dlp's own `deno` default stays; a Node already on PATH is offered as the alternative, nothing is installed). Without one, yt-dlp warns that YouTube extraction is degraded and formats can be missing — this keeps the fast, complete path.
+
 ## 1.4.0 — Free music, on tap 🎧
 
 **Free music tier: previews, public-domain catalogue and radio**

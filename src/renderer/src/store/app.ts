@@ -1,9 +1,11 @@
 import { create } from 'zustand'
 import { restorePlayerSession, usePlayer } from '../player/engine'
+import { prefetchRadioChannels, resolveRadio } from '../player/prewarm'
 import { t } from '../lib/i18n'
 import { loadAccent, loadAvatarBg, saveAccent, saveAvatarBg } from '../lib/profile'
 import { normalizeText } from '../lib/search'
 import { streamUrlFor } from '@shared/streamUrl'
+import { mergeHits } from '@shared/freeMerge'
 import {
   DEFAULT_SETTINGS,
   type AppSettings,
@@ -38,10 +40,55 @@ let sessionRestored = false
  * Session-scoped YouTube search cache, keyed by the normalised query.
  * Revisiting a query (back/forward nav, clearing + retyping, the Search page's
  * default "popular" fill) renders instantly instead of re-hitting the network.
+ * Persisted to localStorage so a restart doesn't pay the search twice either.
  */
 const SEARCH_CACHE_TTL_MS = 10 * 60 * 1000
 const SEARCH_CACHE_MAX = 80
-const searchCache = new Map<string, { at: number; results: SearchResult[] }>()
+const SEARCH_CACHE_KEY = 'spinity:search-cache-v1'
+const FREE_CACHE_KEY = 'spinity:free-cache-v1'
+
+interface CacheRow<T> {
+  at: number
+  value: T
+}
+
+/** Rehydrate a persisted query cache, dropping entries past their TTL. */
+function hydrateCache<T>(storageKey: string): Map<string, CacheRow<T>> {
+  const map = new Map<string, CacheRow<T>>()
+  try {
+    const raw = localStorage.getItem(storageKey)
+    if (!raw) return map
+    const rows = JSON.parse(raw) as Array<[string, CacheRow<T>]>
+    if (!Array.isArray(rows)) return map
+    const now = Date.now()
+    for (const row of rows.slice(-SEARCH_CACHE_MAX)) {
+      if (!Array.isArray(row) || row.length !== 2) continue
+      const [key, entry] = row
+      if (typeof key !== 'string' || !entry || typeof entry.at !== 'number') continue
+      if (now - entry.at > SEARCH_CACHE_TTL_MS) continue
+      map.set(key, entry)
+    }
+  } catch {
+    /* first run, private mode or a corrupt payload — start empty */
+  }
+  return map
+}
+
+/** Best-effort persist; quota or serialization problems keep the memory cache. */
+function persistCache<T>(storageKey: string, map: Map<string, CacheRow<T>>): void {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify([...map.entries()].slice(-SEARCH_CACHE_MAX)))
+  } catch {
+    /* over quota — the session cache still answers */
+  }
+}
+
+/** Coalesced writers: a burst of searches touches localStorage once. */
+let searchFlushTimer: ReturnType<typeof setTimeout> | null = null
+let freeFlushTimer: ReturnType<typeof setTimeout> | null = null
+
+const searchCache = hydrateCache<SearchResult[]>(SEARCH_CACHE_KEY)
+const freeCache = hydrateCache<FreeHit[]>(FREE_CACHE_KEY)
 
 function cacheGet(key: string): SearchResult[] | undefined {
   const hit = searchCache.get(key)
@@ -50,26 +97,31 @@ function cacheGet(key: string): SearchResult[] | undefined {
     searchCache.delete(key)
     return undefined
   }
-  return hit.results
+  return hit.value
 }
 
 function cachePut(key: string, results: SearchResult[]): void {
   searchCache.delete(key)
-  searchCache.set(key, { at: Date.now(), results })
+  searchCache.set(key, { at: Date.now(), value: results })
   while (searchCache.size > SEARCH_CACHE_MAX) {
     const oldest = searchCache.keys().next().value
     if (oldest === undefined) break
     searchCache.delete(oldest)
   }
+  if (!searchFlushTimer) {
+    searchFlushTimer = setTimeout(() => {
+      searchFlushTimer = null
+      persistCache(SEARCH_CACHE_KEY, searchCache)
+    }, 800)
+  }
 }
 
 /**
- * Same idea for the free catalogues (Deezer / Apple / Internet Archive /
+ * The same idea for the free catalogues (Deezer / Apple / Internet Archive /
  * Spotify): preview and catalogue results change slowly, so a 10-minute
- * session cache keeps retyping and back-navigation instant.
+ * cache keeps retyping and back-navigation instant — and it survives a
+ * restart, so "search too slow" is paid once per query, not per launch.
  */
-const freeCache = new Map<string, { at: number; hits: FreeHit[] }>()
-
 function freeCacheGet(key: string): FreeHit[] | undefined {
   const hit = freeCache.get(key)
   if (!hit) return undefined
@@ -77,18 +129,31 @@ function freeCacheGet(key: string): FreeHit[] | undefined {
     freeCache.delete(key)
     return undefined
   }
-  return hit.hits
+  return hit.value
 }
 
 function freeCachePut(key: string, hits: FreeHit[]): void {
   freeCache.delete(key)
-  freeCache.set(key, { at: Date.now(), hits })
+  freeCache.set(key, { at: Date.now(), value: hits })
   while (freeCache.size > SEARCH_CACHE_MAX) {
     const oldest = freeCache.keys().next().value
     if (oldest === undefined) break
     freeCache.delete(oldest)
   }
+  if (!freeFlushTimer) {
+    freeFlushTimer = setTimeout(() => {
+      freeFlushTimer = null
+      persistCache(FREE_CACHE_KEY, freeCache)
+    }, 800)
+  }
 }
+
+/**
+ * Raw per-provider hits of the free search in flight. The stores below merge
+ * them (shared `mergeHits`, same rules as the main process) as each provider
+ * settles, then replace everything with the authoritative final list.
+ */
+let freePartialHits: FreeHit[] = []
 
 interface Toast {
   message: string
@@ -262,6 +327,21 @@ export const useApp = create<AppState>((set, get) => ({
       }
     })
 
+    // Free catalogues paint as they settle: Deezer and Apple answer in about a
+    // second while the Internet Archive's metadata round trips keep going. The
+    // partials are merged with the same rules the final list uses, so no row
+    // jumps when the authoritative answer replaces them.
+    window.spinity.events.onFreePartial((payload) => {
+      const { freeQuery: active, freeSearching: busy } = get()
+      if (!busy || payload.query !== active) return
+      freePartialHits = freePartialHits.concat(payload.hits)
+      try {
+        set({ freeResults: mergeHits(freePartialHits).slice(0, 28) })
+      } catch {
+        set({ freeResults: freePartialHits.slice(0, 28) })
+      }
+    })
+
     // Streaming failure → fall back to downloading the same track. Free-tier
     // streams (previews / radio) have no downloader behind them — just say so.
     usePlayer.getState().onStreamError((result) => {
@@ -417,12 +497,17 @@ export const useApp = create<AppState>((set, get) => ({
       set({ freeResults: cached, freeQuery: trimmed, freeSearching: false })
       return
     }
-    set({ freeSearching: true, freeQuery: trimmed })
+    set({ freeSearching: true, freeQuery: trimmed, freeResults: [] })
+    freePartialHits = []
     try {
+      // Rows are painted by the onFreePartial subscription while this runs;
+      // the resolved list below is the authoritative merge.
       const hits = await window.spinity.free.search(trimmed, 14)
       freeCachePut(key, hits)
+      freePartialHits = []
       if (get().freeQuery === trimmed) set({ freeResults: hits, freeSearching: false })
     } catch (err) {
+      freePartialHits = []
       if (get().freeQuery === trimmed) set({ freeResults: [], freeSearching: false })
       if (!silent) get().notify(errMessage(err), 'error')
     }
@@ -474,7 +559,11 @@ export const useApp = create<AppState>((set, get) => ({
   loadRadio: async () => {
     if (get().radio.length > 0) return
     try {
-      set({ radio: await window.spinity.free.radio() })
+      const radio = await window.spinity.free.radio()
+      set({ radio })
+      // Resolve the playlists of the stations the UI shows first, quietly, so
+      // the first tune-in skips the .pls round trip entirely.
+      prefetchRadioChannels(radio, 8)
     } catch {
       /* offline — the section simply stays hidden */
     }
@@ -483,7 +572,8 @@ export const useApp = create<AppState>((set, get) => ({
   /** Dial a live station: resolve its .pls, then play the direct stream. */
   playRadio: async (channel) => {
     try {
-      const url = await window.spinity.free.radioResolve(channel.plsUrl)
+      // Usually already resolved by the prefetch/hover warmup.
+      const url = await resolveRadio(channel.plsUrl)
       const track: Track = {
         id: `radio:${channel.id}`,
         source: 'radio',

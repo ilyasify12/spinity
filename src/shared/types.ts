@@ -185,6 +185,16 @@ export interface FreeHit {
   license?: string
 }
 
+/**
+ * Part of a free-catalogue search: one provider settled while the others are
+ * still in flight, so its rows can render early (main → renderer event).
+ */
+export interface FreeSearchPartial {
+  /** The query these hits belong to (older queries are ignored). */
+  query: string
+  hits: FreeHit[]
+}
+
 /** One always-on radio station (SomaFM-style public streams). */
 export interface RadioChannel {
   id: string

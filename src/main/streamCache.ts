@@ -418,12 +418,18 @@ export function createStreamCache(options: StreamCacheOptions) {
     }
   }
 
-  /** Best-effort wait until Content-Length is known (protocol range setup). */
+  /**
+   * Best-effort wait until the protocol response can be built truthfully:
+   * resolves as soon as either Content-Length is known (arrives with the
+   * response headers) or the first body byte has landed. A server that never
+   * sends a length must not cost the caller the whole timeout — bytes are
+   * already readable, so the 200 answer can start immediately.
+   */
   async function waitForTotal(key: string, timeoutMs = 2_500): Promise<void> {
     const deadline = Date.now() + timeoutMs
     for (;;) {
       const session = sessions.get(key)
-      if (!session || session.total > 0 || session.done || session.error) return
+      if (!session || session.total > 0 || session.firstByteMs !== null || session.done || session.error) return
       if (Date.now() > deadline) return
       await sleep(10)
     }

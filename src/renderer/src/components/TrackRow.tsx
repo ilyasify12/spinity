@@ -1,4 +1,4 @@
-import { memo, type ReactNode } from 'react'
+import { memo, useEffect, useRef, type ReactNode } from 'react'
 import { IconPause, IconPlay } from './Icons'
 import { TrackArtwork } from './TrackArtwork'
 import { formatTime } from '../lib/format'
@@ -13,6 +13,12 @@ interface TrackRowProps {
   /** Highlights the row when it is the track currently playing. */
   playing?: boolean
   onPlay?: () => void
+  /**
+   * Speculative warmup for network rows: fired ~140ms after the pointer
+   * settles on the row (not every fly-by), so the click starts instantly.
+   * De-duplicated by the caller; failures are its problem, never the UI's.
+   */
+  onPrewarm?: () => void
   /** Buttons revealed on hover (download, add to playlist, remove...). */
   actions?: ReactNode
   /** Heart toggle (Liked Songs). Rendered ahead of actions when provided. */
@@ -39,6 +45,7 @@ export const TrackRow = memo(function TrackRow({
   durationSec,
   playing = false,
   onPlay,
+  onPrewarm,
   actions,
   liked,
   onToggleLike,
@@ -46,11 +53,31 @@ export const TrackRow = memo(function TrackRow({
   onContextMenu
 }: TrackRowProps): React.JSX.Element {
   const interactive = Boolean(onPlay)
+  const prewarmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const cancelPrewarm = (): void => {
+    if (prewarmTimer.current) {
+      clearTimeout(prewarmTimer.current)
+      prewarmTimer.current = null
+    }
+  }
+  // A row unmounting mid-hover (results replaced) must not fire later.
+  useEffect(() => cancelPrewarm, [])
+  const schedulePrewarm = (): void => {
+    if (!onPrewarm || prewarmTimer.current) return
+    prewarmTimer.current = setTimeout(() => {
+      prewarmTimer.current = null
+      try {
+        onPrewarm()
+      } catch {}
+    }, 140)
+  }
 
   return (
     <div
       className={`track-row${playing ? ' playing' : ''}`}
       onContextMenu={onContextMenu}
+      onPointerEnter={onPrewarm ? schedulePrewarm : undefined}
+      onPointerLeave={onPrewarm ? cancelPrewarm : undefined}
       onDoubleClick={(e) => {
         if (!(e.target as HTMLElement).closest('button, select, input, a')) onPlay?.()
       }}

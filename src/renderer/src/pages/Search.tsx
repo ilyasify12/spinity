@@ -1,6 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useApp } from '../store/app'
 import { useCurrentTrack, usePlayer } from '../player/engine'
+import { prewarmFree, prewarmRadio, prewarmStream } from '../player/prewarm'
 import { TrackRow } from '../components/TrackRow'
 import { openContextMenu, playlistSubmenu, type MenuItem } from '../components/ContextMenu'
 import { IconDownload, IconExternal, IconPause, IconPlay } from '../components/Icons'
@@ -205,6 +206,9 @@ export function SearchPage(): React.JSX.Element {
         durationSec={r.durationSec}
         playing={isActive}
         onPlay={handlePlay}
+        // Hovering warms the yt-dlp resolve (seconds cold, cached 3h) so the
+        // click only waits for the element's first buffer.
+        onPrewarm={owned ? undefined : () => prewarmStream(r.id)}
         liked={likedSet.has(r.id)}
         onToggleLike={() => void toggleLike(r.id, r)}
         onContextMenu={menu}
@@ -292,6 +296,9 @@ export function SearchPage(): React.JSX.Element {
         durationSec={hit.durationSec}
         playing={isActive}
         onPlay={handlePlay}
+        // Hovering starts the write-through cache download; the click then
+        // reads locally instead of opening the network path.
+        onPrewarm={playable ? () => prewarmFree(hit) : undefined}
         actions={
           <>
             <span className="chip" title={`${providerLabel(hit.provider)}${alsoOn}`}>
@@ -429,6 +436,10 @@ export function SearchPage(): React.JSX.Element {
         <section style={{ marginBottom: 24 }}>
           <div className="sp-section-head">
             <h2>{t('free.title', 'Free to play')}</h2>
+            {/* Partials land while the slower catalogues are still answering. */}
+            {freeSearching && freeResults.length > 0 && (
+              <span className="chip">{t('free.stillLooking', 'still looking…')}</span>
+            )}
           </div>
           <p className="hint" style={{ marginTop: -8, marginBottom: 12 }}>
             {t(
@@ -469,6 +480,7 @@ export function SearchPage(): React.JSX.Element {
                   durationSec={0}
                   playing={isActive}
                   onPlay={handleTune}
+                  onPrewarm={isActive ? undefined : () => prewarmRadio(channel)}
                   actions={
                     <>
                       <span className="chip" title={channel.description}>

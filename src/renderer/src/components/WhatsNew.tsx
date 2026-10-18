@@ -10,6 +10,14 @@ interface Note {
 /** Newest first. The modal shows every version newer than what was last seen. */
 const NOTES_BY_VERSION: { version: string; notes: Note[] }[] = [
   {
+    version: '1.4.1',
+    notes: [
+      { title: 'Search arrives while you read', body: 'The Free to play section now paints each catalogue the moment it answers \u2014 Deezer and Apple rows in about a second, the Internet Archive filling in behind them. Repeat searches are also remembered across restarts.' },
+      { title: 'Play starts on hover', body: 'Rest the pointer on a result and the heavy part starts early: YouTube rows resolve their stream, previews start caching, radio resolves its station. Clicking Play then only waits for the first moments of audio.' },
+      { title: 'Radio tunes in faster', body: 'The stations shown on the Search page are resolved in the background right away, so the first tune-in skips the playlist lookup.' }
+    ]
+  },
+  {
     version: '1.4.0',
     notes: [
       { title: 'Free music, straight away', body: 'Search now also looks through Deezer and Apple previews and the Internet Archive\u2019s public-domain and Creative Commons catalogue \u2014 press play and it starts, no account and nothing to download. Add optional Spotify API keys in Settings and Spotify results link out to the real recording.' },

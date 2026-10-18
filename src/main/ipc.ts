@@ -424,11 +424,14 @@ export function registerIpc(): void {
   // audioUrl is an official preview clip or a freely-published file.
   let radioCache: { at: number; list: RadioChannel[] } | null = null
 
-  ipcMain.handle(IPC.freeSearch, async (_e, query: string, limit?: number): Promise<FreeHit[]> => {
+  ipcMain.handle(IPC.freeSearch, async (event, query: string, limit?: number): Promise<FreeHit[]> => {
     requireUser()
     const q = String(query ?? '').trim().slice(0, 200)
     if (q.length < 2) return []
     const settings = db.getSettings()
+    // Paint each catalogue's rows the moment that catalogue answers — the
+    // element never waits for the slowest provider to see the fastest one.
+    const sender = event.sender
     return searchFree({
       query: q,
       limit: Number.isFinite(limit) ? Math.min(Number(limit), 30) : 14,
@@ -436,7 +439,14 @@ export function registerIpc(): void {
       spotify:
         settings.spotifyClientId && settings.spotifyClientSecret
           ? { clientId: settings.spotifyClientId, clientSecret: settings.spotifyClientSecret }
-          : null
+          : null,
+      onPartial: (hits) => {
+        try {
+          sender.send(IPC.evtFreePartial, { query: q, hits })
+        } catch {
+          /* window closed mid-search */
+        }
+      }
     })
   })
 

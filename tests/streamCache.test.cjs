@@ -73,6 +73,24 @@ const server = http.createServer((req, res) => {
     res.end(BODY)
     return
   }
+  if (url.pathname === '/chunked') {
+    // No Content-Length: the response is chunked, so the reader must be able
+    // to start from the first byte without ever learning the total.
+    res.writeHead(200, { 'Content-Type': 'audio/mpeg' })
+    let offset = 0
+    const step = Math.ceil(BODY.length / 6)
+    const tick = () => {
+      if (offset >= BODY.length) {
+        res.end()
+        return
+      }
+      res.write(BODY.subarray(offset, offset + step))
+      offset += step
+      setTimeout(tick, 30)
+    }
+    tick()
+    return
+  }
   if (url.pathname === '/hang') {
     hits.hang++
     // Never respond; the idle watchdog has to give up on its own.
@@ -281,6 +299,27 @@ test('ranged reads are byte-exact, and clear() empties completed entries', async
   const stats = cache.clear()
   assert.equal(stats.entries, 0)
   assert.equal(stats.bytes, 0)
+})
+
+test('a server without Content-Length still serves from the first byte', async () => {
+  const dir = fs.mkdtempSync(path.join(out, 'cache-'))
+  const cache = createStreamCache({ dir, idleMs: 3000, connectMs: 3000 })
+  const session = cache.open(`${base()}/chunked`)
+
+  // The protocol handler waits (briefly) for `total` before answering; with a
+  // chunked upstream the wait must yield to the first byte instead of burning
+  // its whole budget and delaying every play by the timeout.
+  const t0 = Date.now()
+  await cache.waitForTotal(session.key, 5000)
+  const waited = Date.now() - t0
+  assert.ok(waited < 1500, `waitForTotal must not burn its full timeout (waited ${waited} ms)`)
+  assert.equal(session.total, 0, 'no Content-Length: the total is unknown when serving starts')
+
+  const got = await readAll(cache.read(session.key, 0, null))
+  await cache.wait(session.key)
+  assert.equal(sha(got), sha(BODY), 'the streamed copy is byte-identical')
+  assert.equal(session.total, BODY.length, 'completion backfills the total')
+  assert.equal(session.done, true)
 })
 
 test('play telemetry keeps a rolling window', () => {

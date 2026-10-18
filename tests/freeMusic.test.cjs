@@ -295,6 +295,56 @@ test('searchFree survives a provider going down', async () => {
   assert.equal(hits.length, 2, 'Apple results still arrive when Deezer fails')
 })
 
+test('searchFree paints each provider as it settles, then merges', async () => {
+  const fetchImpl = async (url) => {
+    const href = String(url)
+    if (href.includes('api.deezer.com')) return jsonRes(DEEZER)
+    if (href.includes('itunes.apple.com')) return jsonRes(ITUNES)
+    if (href.includes('advancedsearch')) return jsonRes(ARCHIVE_SEARCH)
+    if (href.includes('/metadata/no-audio-item')) return jsonRes(ARCHIVE_META_NO_AUDIO)
+    if (href.includes('/metadata/')) return jsonRes(ARCHIVE_META)
+    throw new Error(`unexpected URL ${href}`)
+  }
+
+  const partials = []
+  const hits = await searchFree({
+    query: 'daft punk',
+    limit: 10,
+    fetchImpl,
+    providers: ['deezer', 'itunes', 'archive'],
+    onPartial: (group) => partials.push(group.map((h) => h.provider))
+  })
+
+  // One group per settled provider that found something (the archive item
+  // without audio emits nothing).
+  assert.deepEqual(
+    partials.map((group) => [...new Set(group)].sort()).map((g) => g.join(',')).sort(),
+    ['archive', 'deezer', 'itunes']
+  )
+  const streamed = partials.flat()
+  assert.equal(streamed.length, 4, '1 Deezer + 2 Apple + 1 playable Archive hit stream early')
+
+  // The final answer replaces the partials with exactly the merged list —
+  // same rows, cross-provider duplicates collapsed.
+  assert.equal(hits.length, 3)
+  assert.deepEqual(
+    hits.map((h) => h.id).sort(),
+    ['archive:moonlight-sonata-1905', 'deezer:3135556', 'itunes:2'].sort()
+  )
+})
+
+test('searchFree emits no partial for providers that find nothing', async () => {
+  let partials = 0
+  const hits = await searchFree({
+    query: 'silence',
+    fetchImpl: async () => jsonRes({ data: [], results: [], response: { docs: [] } }),
+    providers: ['deezer', 'itunes', 'archive'],
+    onPartial: () => partials++
+  })
+  assert.equal(hits.length, 0)
+  assert.equal(partials, 0, 'empty providers stay silent')
+})
+
 test('spotify credentials are exchanged once and reused', async () => {
   let tokenCalls = 0
   const fetchImpl = async (url) => {

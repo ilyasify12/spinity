@@ -6,6 +6,7 @@ import type {
   CachedPeaks,
   DownloadJob,
   FreeHit,
+  FreeSearchPartial,
   FreeStats,
   LibrarySnapshot,
   LyricsResult,
@@ -338,6 +339,15 @@ const api = {
       const handler = (_e: unknown, payload: { trackId: string }): void => cb(payload)
       ipcRenderer.on(IPC.evtArtworkReady, handler)
       return () => ipcRenderer.removeListener(IPC.evtArtworkReady, handler)
+    },
+    /**
+     * Part of a free-catalogue search settled (Deezer/Apple answer in ~1s,
+     * the Internet Archive takes longer) so the section can paint early.
+     */
+    onFreePartial: (cb: (payload: FreeSearchPartial) => void): (() => void) => {
+      const handler = (_e: unknown, payload: FreeSearchPartial): void => cb(payload)
+      ipcRenderer.on(IPC.evtFreePartial, handler)
+      return () => ipcRenderer.removeListener(IPC.evtFreePartial, handler)
     },
     /** Mini window: live player snapshot from the main window. */
     onMiniState: (cb: (snapshot: MiniSnapshot) => void): (() => void) => {

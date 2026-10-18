@@ -186,7 +186,12 @@ export const IPC = {
    * Main → renderer: a borrowed YouTube cover finished downloading for a local
    * track, so its tile can stop showing the placeholder and ask again.
    */
-  evtArtworkReady: 'evt:artwork-ready'
+  evtArtworkReady: 'evt:artwork-ready',
+  /**
+   * Main → renderer: part of a free-catalogue search settled, so its rows can
+   * paint while the slower providers are still being queried.
+   */
+  evtFreePartial: 'evt:free-partial'
 } as const
 
 export type IpcChannel = (typeof IPC)[keyof typeof IPC]

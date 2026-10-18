@@ -1,4 +1,8 @@
+import { mergeHits } from '../shared/freeMerge'
 import type { FreeHit, FreeProvider, RadioChannel } from '../shared/types'
+
+// Re-exported for the existing test suite / callers that bundled this module.
+export { mergeHits }
 
 /**
  * Free music tier — search adapters for legitimately free/playable audio.
@@ -32,14 +36,6 @@ const RADIO_CHANNELS_URL = 'https://somafm.com/channels.json'
 /** Plain Spotify search URL — openable by anyone, no API needed. */
 export function spotifySearchUrl(query: string): string {
   return `https://open.spotify.com/search/${encodeURIComponent(query.trim())}`
-}
-
-function normalizeText(value: string): string {
-  return value
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim()
 }
 
 function isHttpUrl(value: unknown): value is string {
@@ -318,61 +314,6 @@ export async function searchSpotify(
   return parseSpotify(await res.json())
 }
 
-// ------------------------------------------------------------------- merge
-
-const PROVIDER_RANK: Record<FreeProvider, number> = { deezer: 0, itunes: 1, archive: 2, spotify: 3 }
-
-/** Prefer playable hits, then a stable provider order. */
-function betterHit(a: FreeHit, b: FreeHit): FreeHit {
-  const aPlay = a.audioUrl ? 1 : 0
-  const bPlay = b.audioUrl ? 1 : 0
-  if (aPlay !== bPlay) return aPlay > bPlay ? a : b
-  if (PROVIDER_RANK[a.provider] !== PROVIDER_RANK[b.provider]) {
-    return PROVIDER_RANK[a.provider] < PROVIDER_RANK[b.provider] ? a : b
-  }
-  return a
-}
-
-function fingerprint(hit: FreeHit): string {
-  return `${normalizeText(hit.title)}|${normalizeText(hit.artist.replace(/\s*-\s*topic$/i, ''))}`
-}
-
-/**
- * Deduplicate across providers: the same recording found on Deezer and Apple
- * keeps one playable row and notes the other source in `alsoOn`. Durations
- * (when both known) must agree within 6s, so live versions don't collapse
- * into studio takes.
- */
-export function mergeHits(hits: FreeHit[]): FreeHit[] {
-  const out: FreeHit[] = []
-  const seenIds = new Set<string>()
-  const index = new Map<string, FreeHit>()
-  for (const hit of hits) {
-    if (seenIds.has(hit.id)) continue
-    seenIds.add(hit.id)
-    const fp = fingerprint(hit)
-    const existing = index.get(fp)
-    if (existing && (!existing.durationSec || !hit.durationSec || Math.abs(existing.durationSec - hit.durationSec) <= 6)) {
-      const keep = betterHit(existing, hit)
-      const drop = keep === existing ? hit : existing
-      if (!keep.alsoOn) keep.alsoOn = []
-      if (!keep.alsoOn.includes(drop.provider)) keep.alsoOn.push(drop.provider)
-      if (!keep.spotifyUrl && drop.spotifyUrl) keep.spotifyUrl = drop.spotifyUrl
-      if (drop.provider === 'spotify' && drop.pageUrl && !keep.pageUrl) keep.pageUrl = drop.pageUrl
-      if (keep !== existing) {
-        // The challenger won: replace the row already emitted.
-        const at = out.indexOf(existing)
-        if (at >= 0) out[at] = keep
-        index.set(fp, keep)
-      }
-      continue
-    }
-    if (!existing) index.set(fp, hit)
-    out.push(hit)
-  }
-  return out
-}
-
 // ------------------------------------------------------------------ search
 
 export interface FreeSearchRequest {
@@ -382,6 +323,12 @@ export interface FreeSearchRequest {
   spotify?: { clientId: string; clientSecret: string } | null
   fetchImpl?: FetchLike
   timeoutMs?: number
+  /**
+   * Called with a provider's hits the moment that provider settles, so the UI
+   * can paint fast catalogues (Deezer/Apple) without waiting for the slowest
+   * one (Internet Archive's item-metadata round trips). Never thrown into.
+   */
+  onPartial?: (hits: FreeHit[]) => void
 }
 
 /**
@@ -394,12 +341,28 @@ export async function searchFree(req: FreeSearchRequest): Promise<FreeHit[]> {
   const limit = Math.min(Math.max(req.limit ?? 14, 1), 30)
   const providers = req.providers ?? ['deezer', 'itunes', 'archive', 'spotify']
 
+  // Settle order is not task order: whichever provider answers first reaches
+  // the UI first. Failures and empty lists emit nothing.
+  const tracked = (task: Promise<FreeHit[]>): Promise<FreeHit[]> =>
+    task.then((hits) => {
+      if (hits.length > 0 && req.onPartial) {
+        try {
+          req.onPartial(hits)
+        } catch {
+          /* a rendering problem must never fail the search */
+        }
+      }
+      return hits
+    })
+
   const tasks: Array<Promise<FreeHit[]>> = []
-  if (providers.includes('deezer')) tasks.push(searchDeezer(f, timeoutMs, req.query, limit))
-  if (providers.includes('itunes')) tasks.push(searchItunes(f, timeoutMs, req.query, limit))
-  if (providers.includes('archive')) tasks.push(searchArchive(f, timeoutMs, req.query, Math.min(limit, 6)))
+  if (providers.includes('deezer')) tasks.push(tracked(searchDeezer(f, timeoutMs, req.query, limit)))
+  if (providers.includes('itunes')) tasks.push(tracked(searchItunes(f, timeoutMs, req.query, limit)))
+  if (providers.includes('archive')) tasks.push(tracked(searchArchive(f, timeoutMs, req.query, Math.min(limit, 6))))
   if (providers.includes('spotify') && req.spotify?.clientId && req.spotify.clientSecret) {
-    tasks.push(searchSpotify(f, timeoutMs, req.query, limit, req.spotify.clientId, req.spotify.clientSecret))
+    tasks.push(
+      tracked(searchSpotify(f, timeoutMs, req.query, limit, req.spotify.clientId, req.spotify.clientSecret))
+    )
   }
   const settled = await Promise.allSettled(tasks)
   const hits = settled.flatMap((r) => (r.status === 'fulfilled' ? r.value : []))

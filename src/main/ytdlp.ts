@@ -26,11 +26,39 @@ let searchAbort: AbortController | null = null
 /** Resolved stream URLs with expiry (signed CDN URLs die after ~6h). */
 const streamCache = new Map<string, { info: StreamInfo; at: number }>()
 const STREAM_TTL_MS = 3 * 60 * 60 * 1000
+/** One yt-dlp process per video id even when resolve calls overlap. */
+const resolveInflight = new Map<string, Promise<StreamInfo>>()
 
 export const isWin = process.platform === 'win32'
 export const isMac = process.platform === 'darwin'
 /** Binary name with the platform's extension (.exe on Windows, bare elsewhere). */
 const bin = (name: string): string => (isWin ? `${name}.exe` : name)
+
+/**
+ * JavaScript runtime for yt-dlp's YouTube player challenge.
+ *
+ * Newer yt-dlp builds run the challenge through the bundled EJS solver and
+ * warn (falling back to slower paths, with formats possibly missing) when no
+ * runtime is available. yt-dlp enables `deno` by default, so the only gap is
+ * a machine that has Node but no deno — pointing yt-dlp at the Node that is
+ * already installed costs nothing and installs nothing. With neither
+ * runtime present the arguments stay exactly as before.
+ */
+let jsRuntimeArgsCache: string[] | null = null
+function jsRuntimeArgs(): string[] {
+  if (jsRuntimeArgsCache) return jsRuntimeArgsCache
+  const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean)
+  const has = (name: string): boolean =>
+    dirs.some((dir) => {
+      try {
+        return fs.existsSync(path.join(dir, isWin ? `${name}.exe` : name))
+      } catch {
+        return false
+      }
+    })
+  jsRuntimeArgsCache = has('deno') || !has('node') ? [] : ['--js-runtimes', 'node']
+  return jsRuntimeArgsCache
+}
 
 /** Spinity-managed tools dir (writable, no admin). Memoized — mkdir once. */
 let toolsDirCache: string | null = null
@@ -552,6 +580,8 @@ class DownloadManager {
       '--no-warnings',
       '--retries', '3',
       '--socket-timeout', '20',
+      // Keep the download on the same JS-runtime path as stream resolution.
+      ...jsRuntimeArgs(),
       // Emit the final path on stdout so we never have to guess the extension.
       '--print', 'after_move:filepath',
       '-o', path.join(req.outDir, '%(id)s.%(ext)s')
@@ -693,6 +723,21 @@ export const downloads = new DownloadManager()
  * shell interpretation is possible.
  */
 export async function resolveStreamUrl(videoId: string): Promise<StreamInfo> {
+  // Hover-prewarm and the click can land on the same video — share one
+  // process (and one cache entry) instead of racing two yt-dlp runs.
+  const key = String(videoId)
+  const inflight = resolveInflight.get(key)
+  if (inflight) return inflight
+  const p = resolveStreamUrlUncached(key)
+  resolveInflight.set(key, p)
+  p.catch(() => {})
+    .finally(() => {
+      if (resolveInflight.get(key) === p) resolveInflight.delete(key)
+    })
+  return p
+}
+
+async function resolveStreamUrlUncached(videoId: string): Promise<StreamInfo> {
   const bin = resolveYtDlp()
   if (!bin) throw new Error('yt-dlp was not found on this system')
 
@@ -721,6 +766,8 @@ export async function resolveStreamUrl(videoId: string): Promise<StreamInfo> {
       '--no-warnings',
       '--socket-timeout', '10',
       '--retries', '2',
+      // A JS runtime keeps the player challenge on yt-dlp's fast path.
+      ...jsRuntimeArgs(),
       // NOTE (1.1.5): the android player fast-lane broke streams for some
       // networks/videos, so this is back to yt-dlp's default client
       // selection — slower to resolve, but it plays everywhere 1.0.1 did.

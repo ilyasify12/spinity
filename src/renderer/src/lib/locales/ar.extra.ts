@@ -252,6 +252,7 @@ export const arExtra: Record<string, string> = {
   'free.title': 'استمع مجاناً',
   'free.hint': 'مقاطع تجريبية (30 ثانية) من Deezer وApple، ومقاطع كاملة من المجال العام والمشاع الإبداعي من Internet Archive — تُبثّ فوراً وتُخزَّن على هذا الجهاز لإعادة التشغيل. بدون أي حساب.',
   'free.lookingUp': 'نبحث في المصادر المجانية…',
+  'free.stillLooking': 'ما زلنا نبحث…',
   'free.previewChip': 'تجريبي',
   'free.tipPreview': 'شغّل المقطع التجريبي فوراً — مخزَّن للاستماع المتكرر',
   'free.tipFull': 'شغّل الآن — مخزَّن محلياً لإعادة تشغيل فورية',
