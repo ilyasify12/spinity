@@ -624,8 +624,8 @@ export const useApp = create<AppState>((set, get) => ({
 
     set({ startingId: result.id })
     try {
-      const info = await window.spinity.youtube.stream(result.id)
-      usePlayer.getState().playStream(info.url, result)
+      const info = await window.spinity.youtube.stream(result.id, { fill: true })
+      usePlayer.getState().playStream(info.streamUrl ?? info.url, result)
       get().notify(t('toast.streamingFallback', 'Streaming — will download automatically if this fails'))
     } catch (err) {
       get().notify(`${errMessage(err)}${t('toast.downloadingInstead', ' — downloading instead')}`, 'error')

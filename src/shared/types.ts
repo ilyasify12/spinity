@@ -65,6 +65,13 @@ export interface AppSettings {
    * is downloaded before it plays.
    */
   preferStreaming: boolean
+  /**
+   * Keep a local copy of streamed tracks (write-through cache, plus an
+   * aria2c multi-connection fill when aria2c is installed) so replays are
+   * instant and work offline. Uses background bandwidth; the cache keeps a
+   * 512 MB budget and evicts the least recently used entries.
+   */
+  cacheStreams: boolean
   /** Custom library root; defaults to %APPDATA%/spinity/users. */
   libraryRoot?: string
   /** Start Spinity automatically when Windows starts (login item). */
@@ -121,6 +128,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   audioQuality: '0',
   concurrency: 2,
   preferStreaming: true,
+  cacheStreams: true,
   launchAtLogin: false,
   miniAutoHide: true,
   discordPresence: true,
@@ -147,6 +155,18 @@ export interface StreamInfo {
   url: string
   ext: string
   protocol: string
+  /**
+   * Cache-backed playback URL (`spinity://stream/…`) for when the caller
+   * should play through the local stream cache instead of the CDN — set
+   * while no accelerator fills the cache separately, so one write-through
+   * download serves playback and the cache at once.
+   */
+  streamUrl?: string
+  /** True when the full file is already on disk (replay is local/offline). */
+  cached?: boolean
+  /** Present when the input was free text (`ytmsearch`) rather than an id. */
+  videoId?: string
+  title?: string
 }
 
 /** Which public catalogue a free-to-play hit came from. */
@@ -279,6 +299,13 @@ export interface ToolStatus {
   ffmpegPath: string | null
   ffmpegVersion: string | null
   ready: boolean
+  /**
+   * Optional multi-connection downloader behind the stream cache. Not
+   * required for anything: when absent, streaming and caching fall back to
+   * the single-connection write-through path.
+   */
+  aria2cPath: string | null
+  aria2cVersion: string | null
 }
 
 /** ffprobe result for the player bar's codec tag. All rates in Hz/bits. */

@@ -10,6 +10,15 @@ interface Note {
 /** Newest first. The modal shows every version newer than what was last seen. */
 const NOTES_BY_VERSION: { version: string; notes: Note[] }[] = [
   {
+    version: '1.5.0',
+    notes: [
+      { title: 'Instant play, quiet caching', body: 'Clicking a result now hands the player the direct CDN link \u2014 audio starts as soon as the network delivers it. In parallel the same track is copied into the local cache, so every later play is served from disk: instant, and offline once cached.' },
+      { title: '16 connections when you have aria2c', body: 'With aria2c installed (\u201cOptional\u201d row in Settings \u2192 Tools; winget install aria2.aria2) the background copy runs multi-connection and fills a track in seconds. Without it everything still works \u2014 the cache just fills on a single connection. Fills are capped at two at a time so a burst of clicks never floods your connection.' },
+      { title: 'Caching that heals itself', body: 'If a signed URL is refused mid-download \u2014 some YouTube clients sign URLs that only answer their own requests \u2014 the copy retries through yt-dlp with a freshly minted link. Cache entries are keyed by video id, so even a re-signed stream replays from disk. Music you streamed can now also resolve straight from text ("Artist - Track") when an integration asks for it.' },
+      { title: 'Your cache, your rules', body: 'New switch in Settings \u2192 Downloads: Cache streamed tracks. Inside a 512 MB budget, least-recently-used entries are evicted first.' }
+    ]
+  },
+  {
     version: '1.4.1',
     notes: [
       { title: 'Search arrives while you read', body: 'The Free to play section now paints each catalogue the moment it answers \u2014 Deezer and Apple rows in about a second, the Internet Archive filling in behind them. Repeat searches are also remembered across restarts.' },

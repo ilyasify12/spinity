@@ -1,5 +1,22 @@
 # Spinity Changelog
 
+## 1.5.0 — Instant streams, self-healing background caching ⚡
+
+**Play starts from the CDN while the cache catches up behind it**
+- **Direct-URL playback.** A click hands `<audio>` the signed googlevideo URL itself — first audio waits only for the CDN, with no main-process round trip. When no accelerator is installed the answer instead carries a cache-backed `streamUrl`, so the one write-through download still serves playback and the cache at the same time.
+- **Background fill with aria2c.** In parallel, the same track is downloaded into the stream cache with `-x 16 -s 16 -k 1M` (multi-connection; live-measured seconds per track). Settings → Tools now reports whether aria2c was found (`winget install aria2.aria2` / `brew install aria2`) — nothing is auto-installed and the app works unchanged without it.
+- **Self-healing fills.** Some player clients (visionos/ios/android) sign URLs whose server refuses requests that don't look like the client that asked (live-measured: terminated connection, 403). A refused direct fetch is retried through yt-dlp, which re-extracts with the right client and headers and attaches aria2c as its external downloader — one fallback covers expiry *and* client-specific refusal. A missing aria2c only makes yt-dlp warn and use its internal downloader, so fills never hang.
+- **Cache entries keyed by video id.** Signed URLs rotate every few hours, so entries live under `yt:<videoId>` (`spinity://stream/?u=…&k=yt:…`) and a re-signed URL still replays from disk. The 512 MB LRU budget is unchanged; stale `.bin.aria2` control files are swept at startup.
+- **Concurrency caps.** At most two fills run at once (FIFO queue of 8) — a burst of clicks can never stack twenty 16-connection transfers. New setting: **Cache streamed tracks** (Settings → Downloads, default on).
+- **Text resolves.** `youtube.stream(text, { query: true })` turns "Artist - Track" into a stream in one process (`ytsearch1` search + extract, ~5 s live) and remembers the winning id, so later id-based plays are instant. Note: the originally specified `ytmsearch1:` prefix is not an extractor in current yt-dlp (live error: `Unsupported url scheme: "ytmsearch1"`), and music.youtube.com search URLs return browse ids and extract 3–7× slower — `ytsearch1` is what the app's own Search page uses, so text resolve stays consistent with it.
+- Every resolve site (click, engine fallbacks, party sync) now plays `info.streamUrl ?? info.url`; the engine's post-failure re-resolve passes `fresh: true`, so a stale signature can never be answered with itself.
+
+**Tests** — 110 → 140
+- Instant-parse fixtures: JSON `--print` lines, titles with quotes/pipes, `NA` fields, ranked candidate ids.
+- aria2c: argv building, progress/unit parsing, expiry classification, and the download lifecycle against a fake child process (success, expired 403, empty file, watchdog kill).
+- Fill orchestration: publish into the cache, full cleanup on failure, single-download dedupe, aria2 → yt-dlp fallback, two-at-a-time queue cap.
+- Stream cache: key-hint replay across rotated URLs, external `publish` (refused while a tee owns the key), `.aria2` orphan sweeping at startup.
+
 ## 1.4.1 — Search arrives while you're reading, play starts on hover ⚡
 
 **Free-catalogue results appear as they arrive**

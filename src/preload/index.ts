@@ -132,9 +132,16 @@ const api = {
   youtube: {
     search: (query: string, limit?: number): Promise<SearchResult[]> =>
       ipcRenderer.invoke(IPC.youtubeSearch, query, limit),
-    /** Resolve a direct stream URL for a video id. */
-    stream: (videoId: string): Promise<StreamInfo> =>
-      ipcRenderer.invoke(IPC.youtubeStream, videoId)
+    /**
+     * Resolve a stream for `videoId` — or, with `opts.query`, for free text
+     * ("Artist - Track") via a YouTube Music search. `opts.fill` marks a real
+     * playback (a background cache fill is allowed); `opts.fresh` skips the
+     * 3-hour URL memo after a playback failure.
+     */
+    stream: (
+      videoId: string,
+      opts?: { fill?: boolean; query?: boolean; fresh?: boolean }
+    ): Promise<StreamInfo> => ipcRenderer.invoke(IPC.youtubeStream, videoId, opts)
   },
 
   downloads: {

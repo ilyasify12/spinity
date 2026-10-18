@@ -102,7 +102,7 @@ export async function onPartyState(partyId: string, playback: { trackIndex: numb
       } else {
         try {
           const info = await window.spinity.youtube.stream(track.videoId)
-          player.playStream(info.url, { id: track.videoId, source: 'youtube', title: track.title, artist: track.artist, durationSec: track.durationSec, thumbnail: track.thumbnail, webUrl: track.webUrl })
+          player.playStream(info.streamUrl ?? info.url, { id: track.videoId, source: 'youtube', title: track.title, artist: track.artist, durationSec: track.durationSec, thumbnail: track.thumbnail, webUrl: track.webUrl })
         } catch {
           // Stream failed — guest stays silent until host changes track.
           return

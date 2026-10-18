@@ -336,3 +336,72 @@ test('play telemetry keeps a rolling window', () => {
   assert.equal(stats.netPlays, 2)
   assert.equal(stats.netAvgMs, 280)
 })
+
+test('a key hint keeps one entry across rotated (re-signed) URLs', async () => {
+  const dir = fs.mkdtempSync(path.join(out, 'cache-'))
+  const cache = createStreamCache({ dir, idleMs: 2000, connectMs: 2000 })
+
+  const before = hits.full
+  const first = cache.open(`${base()}/full`, { keyHint: 'yt:abcdefghijk' })
+  await cache.wait(first.key)
+  assert.equal(hits.full, before + 1, 'the first open fetched once')
+
+  // The same video identity, re-signed: a different URL, the same entry.
+  const replay = cache.open(`${base()}/full?resign=2`, { keyHint: 'yt:abcdefghijk' })
+  assert.equal(replay.key, first.key)
+  assert.equal(replay.cached, true)
+  const got = await readAll(cache.read(replay.key, 0, null))
+  assert.equal(sha(got), sha(BODY))
+  assert.equal(hits.full, before + 1, 'a re-signed URL must not re-download')
+})
+
+test('publish adopts a file written by an external downloader', async () => {
+  const dir = fs.mkdtempSync(path.join(out, 'cache-'))
+  const cache = createStreamCache({ dir })
+  const key = cache.keyFor('yt:zzzzzzzzzzz')
+  const payload = Buffer.from(Array.from({ length: 40 * 1024 }, (_, i) => (i * 13 + 5) % 256))
+  fs.writeFileSync(path.join(dir, `${key}.bin`), payload)
+
+  const before = hits.full
+  assert.equal(
+    cache.publish(key, { url: `${base()}/full`, contentType: 'audio/mp4', total: payload.length }),
+    true
+  )
+
+  const entry = cache.get(key)
+  assert.equal(entry.done, true)
+  assert.equal(entry.cached, true)
+  assert.equal(entry.total, payload.length)
+  assert.equal(entry.contentType, 'audio/mp4')
+  const got = await readAll(cache.read(key, 0, null))
+  assert.equal(sha(got), sha(payload))
+  const ranged = await readAll(cache.read(key, 10, 109))
+  assert.equal(sha(ranged), sha(payload.subarray(10, 110)))
+  assert.equal(hits.full, before, 'an adopted entry never touches the network')
+
+  // Nothing on disk: publish must refuse.
+  assert.equal(cache.publish(cache.keyFor('yt:nonexistent'), { url: 'x', contentType: '', total: 0 }), false)
+})
+
+test('publish refuses to steal a key from an active writer', async () => {
+  const dir = fs.mkdtempSync(path.join(out, 'cache-'))
+  const cache = createStreamCache({ dir, idleMs: 2000, connectMs: 2000 })
+  const session = cache.open(`${base()}/slow`)
+  assert.equal(
+    cache.publish(session.key, { url: session.url, contentType: 'audio/mpeg', total: 1 }),
+    false,
+    'a tee in flight owns the payload'
+  )
+  await cache.wait(session.key)
+})
+
+test('aria2 control files and orphaned payloads are cleaned at startup', () => {
+  const dir = fs.mkdtempSync(path.join(out, 'cache-'))
+  fs.writeFileSync(path.join(dir, 'aaaaaaaaaaaaaaaa.bin'), 'partial')
+  fs.writeFileSync(path.join(dir, 'aaaaaaaaaaaaaaaa.bin.aria2'), 'control')
+  fs.writeFileSync(path.join(dir, 'bbbbbbbbbbbbbbbb.bin.aria2'), 'orphan control')
+  createStreamCache({ dir })
+  assert.equal(fs.existsSync(path.join(dir, 'aaaaaaaaaaaaaaaa.bin')), false)
+  assert.equal(fs.existsSync(path.join(dir, 'aaaaaaaaaaaaaaaa.bin.aria2')), false)
+  assert.equal(fs.existsSync(path.join(dir, 'bbbbbbbbbbbbbbbb.bin.aria2')), false)
+})

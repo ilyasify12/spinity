@@ -452,7 +452,7 @@ export function SettingsPage(): React.JSX.Element {
           </select>
         </div>
 
-        <div className="field" style={{ marginBottom: 0 }}>
+        <div className="field">
           <label htmlFor="conc">Simultaneous downloads</label>
           <select
             id="conc"
@@ -465,6 +465,23 @@ export function SettingsPage(): React.JSX.Element {
             <option value={4}>4 — more likely to be rate-limited</option>
           </select>
         </div>
+
+        <label className="check-row" style={{ marginBottom: 0 }}>
+          <input
+            type="checkbox"
+            checked={settings.cacheStreams}
+            onChange={(e) => void updateSettings({ cacheStreams: e.target.checked })}
+          />
+          <span>
+            <strong>Cache streamed tracks</strong>
+            <br />
+            <span className="hint">
+              Every streamed song is also kept on this PC — replays start instantly and work
+              offline. Fills run in the background (16 connections when aria2c is installed),
+              inside a 512 MB budget that evicts the least recently used first.
+            </span>
+          </span>
+        </label>
       </div>
 
       <div className="card" style={{ marginBottom: 20 }}>
@@ -944,6 +961,21 @@ export function SettingsPage(): React.JSX.Element {
                 <div className="track-title">ffmpeg</div>
                 <div className="track-artist" style={{ wordBreak: 'break-all' }}>
                   {status.ffmpegPath ?? (IS_MAC ? 'Not found — install with: brew install ffmpeg' : 'Not found — install with: winget install ffmpeg')}
+                </div>
+              </div>
+            </div>
+
+            <div className="pl-row" style={{ paddingLeft: 0 }}>
+              <span className={`chip${status.aria2cPath ? ' chip-ok' : ''}`}>
+                {status.aria2cPath ? 'found' : 'optional'}
+              </span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="track-title">aria2c {status.aria2cVersion ?? ''}</div>
+                <div className="track-artist" style={{ wordBreak: 'break-all' }}>
+                  {status.aria2cPath ??
+                    (IS_MAC
+                      ? 'Optional — 16-connection background cache fills: brew install aria2'
+                      : 'Optional — 16-connection background cache fills: winget install aria2.aria2')}
                 </div>
               </div>
             </div>

@@ -5,7 +5,9 @@ import { autoUpdater } from 'electron-updater'
 import { IPC } from '../shared/ipc'
 import { artworkUrl } from '../shared/thumbs'
 import { db } from './db'
-import { downloads, getToolStatus, resolveStreamUrl, search, updateYtDlp, installYtDlp, installFfmpeg, getPythonStatus, installPythonDeps } from './ytdlp'
+import { downloads, getToolStatus, resolveStreamByQuery, resolveStreamUrl, search, updateYtDlp, installYtDlp, installFfmpeg, getPythonStatus, installPythonDeps } from './ytdlp'
+import { aria2Version, resolveAria2c } from './aria2'
+import { cacheableStream, fillStream, streamKeyHint } from './streamFill'
 import { indexFolder, probeMissingDurations } from './localFiles'
 import { warmArtwork } from './artworkWarm'
 import { socialApi, setSocialAccount, getSocialAccount, connectSocket, disconnectSocket, socketEmit, socialLogin, socialRegister, setSocialBroadcast, setSelfStatus, CLOUD_URL } from './social'
@@ -26,6 +28,7 @@ import type {
   RadioChannel,
   SearchResult,
   StreamInfo,
+  ToolStatus,
   Track,
   User
 } from '../shared/types'
@@ -313,20 +316,69 @@ export function registerIpc(): void {
   )
 
   /**
-   * Resolve a direct stream URL. Kept separate from search so a slow YouTube
-   * lookup never blocks listing results.
+   * Resolve a stream for the element.
    *
-   * The video id is re-validated here rather than trusting the renderer, since
-   * it ends up inside a URL yt-dlp will fetch.
+   * `input` is a video id — or free text when `opts.query` is set, resolved
+   * through a YouTube Music search (`ytmsearch`) without a prior search list.
+   *
+   * `opts.fill` marks a real playback and picks the caching strategy:
+   *
+   *  - aria2c installed (and the entry not already serveable): the direct CDN
+   *    URL is returned and a multi-connection fill starts in the background —
+   *    first audio waits for nothing but the CDN, the cache catches up in
+   *    seconds, and later plays are served from disk.
+   *  - otherwise: the answer carries a cache-backed `streamUrl`, so the one
+   *    write-through download serves playback AND the cache at the same time.
+   *
+   * `opts.fresh` skips the 3h URL memo — used after a playback failure so a
+   * stale signature can never be answered with itself.
    */
-  ipcMain.handle(IPC.youtubeStream, (_e, videoId: string): Promise<StreamInfo> => {
-    requireUser()
-    const id = String(videoId ?? '').trim()
-    if (!/^[A-Za-z0-9_-]{6,20}$/.test(id)) {
-      return Promise.reject(new Error('Invalid video id'))
+  ipcMain.handle(
+    IPC.youtubeStream,
+    async (
+      _e,
+      input: string,
+      opts?: { fill?: boolean; query?: boolean; fresh?: boolean }
+    ): Promise<StreamInfo> => {
+      requireUser()
+      const text = String(input ?? '').trim()
+      const asQuery = opts?.query === true
+      if (asQuery) {
+        if (text.length < 2 || text.length > 300) {
+          throw new Error('Invalid search text')
+        }
+      } else if (!/^[A-Za-z0-9_-]{6,20}$/.test(text)) {
+        throw new Error('Invalid video id')
+      }
+
+      const info = asQuery
+        ? await resolveStreamByQuery(text)
+        : await resolveStreamUrl(text, { force: opts?.fresh === true })
+
+      const videoId = info.videoId ?? (asQuery ? '' : text)
+      // Only progressive YouTube CDN streams are cacheable here.
+      if (!videoId || !cacheableStream(info)) return info
+      if (db.getSettings().cacheStreams === false) return info
+
+      const cache = getStreamCache()
+      const keyHint = streamKeyHint(videoId)
+      const existing = cache.get(cache.keyFor(keyHint))
+      const serveable = Boolean(existing && !existing.error)
+
+      if (opts?.fill && !serveable && resolveAria2c()) {
+        // Hand the element the direct URL; the fill runs behind it. Errors
+        // are already swallowed inside the fill (best effort by design).
+        void fillStream(videoId, info, { log: (line) => console.log(line) })
+        return info
+      }
+
+      return {
+        ...info,
+        streamUrl: streamUrlFor(info.url, keyHint),
+        cached: Boolean(existing?.done)
+      }
     }
-    return resolveStreamUrl(id)
-  })
+  )
 
   // ------------------------------------------------------------ downloads
   ipcMain.handle(IPC.downloadStart, (_e, result: SearchResult): DownloadJob => {
@@ -505,7 +557,10 @@ export function registerIpc(): void {
     void updatePresence(snap)
   })
 
-  ipcMain.handle(IPC.toolsStatus, () => getToolStatus())
+  ipcMain.handle(IPC.toolsStatus, async (): Promise<ToolStatus> => {
+    const base = await getToolStatus()
+    return { ...base, aria2cPath: resolveAria2c(), aria2cVersion: await aria2Version() }
+  })
 
   ipcMain.handle(IPC.toolsUpdateYtdlp, async (): Promise<string> => {
     requireUser()

@@ -13,16 +13,28 @@
  */
 
 /** Wrap a direct audio URL in the privileged stream scheme. */
-export function streamUrlFor(url: string): string {
-  return `spinity://stream/?u=${encodeURIComponent(url)}`
+export function streamUrlFor(url: string, keyHint?: string): string {
+  const base = `spinity://stream/?u=${encodeURIComponent(url)}`
+  return keyHint ? `${base}&k=${encodeURIComponent(keyHint)}` : base
+}
+
+export interface StreamRequest {
+  url: string
+  /**
+   * Optional stable identity (`yt:<videoId>`). Signed CDN URLs rotate after
+   * a few hours; a hinted request finds the entry by id instead of by URL,
+   * so a re-signed stream still replays from disk.
+   */
+  keyHint?: string
 }
 
 /**
- * Recover the source URL from a `spinity://stream/…` request URL.
- * Returns null for anything that is not a well-formed http(s) target, so a
- * malformed request can never reach the network layer.
+ * Unwrap a `spinity://stream/…` request. Returns null for anything that is
+ * not a well-formed http(s) target, so a malformed request can never reach
+ * the network layer. The key hint is validated to a strict alphabet (it is
+ * interpolated into a sha1, never into a command).
  */
-export function streamUrlFrom(href: string): string | null {
+export function streamRequestFrom(href: string): StreamRequest | null {
   try {
     const parsed = new URL(href)
     if (parsed.protocol !== 'spinity:' || parsed.hostname !== 'stream') return null
@@ -30,8 +42,19 @@ export function streamUrlFrom(href: string): string | null {
     if (!raw) return null
     const target = new URL(raw)
     if (target.protocol !== 'https:' && target.protocol !== 'http:') return null
-    return target.toString()
+    const request: StreamRequest = { url: target.toString() }
+    const key = parsed.searchParams.get('k')
+    if (key && key.length <= 80 && /^[A-Za-z0-9:_-]+$/.test(key)) request.keyHint = key
+    return request
   } catch {
     return null
   }
+}
+
+/**
+ * Recover just the source URL from a `spinity://stream/…` request URL.
+ * (Kept for existing callers; new code uses `streamRequestFrom`.)
+ */
+export function streamUrlFrom(href: string): string | null {
+  return streamRequestFrom(href)?.url ?? null
 }

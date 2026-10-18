@@ -105,13 +105,21 @@ export function createStreamCache(options: StreamCacheOptions) {
   // Crash leftovers: a payload without its completion sidecar is a dead
   // partial download — remove it (retries start clean); sidecars without a
   // payload are cleaned too. Complete entries count towards the LRU budget.
+  // aria2c control files (written during external fills) die with their
+  // payload — a control file with no `.bin` beside it is garbage.
   try {
     for (const name of fs.readdirSync(dir)) {
       const full = path.join(dir, name)
+      if (name.endsWith('.aria2')) {
+        const base = name.slice(0, -'.aria2'.length)
+        if (!fs.existsSync(path.join(dir, base))) fs.rmSync(full, { force: true })
+        continue
+      }
       if (name.endsWith('.bin')) {
         const key = name.slice(0, -'.bin'.length)
         if (!fs.existsSync(metaFor(key))) {
           fs.rmSync(full, { force: true })
+          fs.rmSync(`${full}.aria2`, { force: true })
           continue
         }
         try {
@@ -181,6 +189,51 @@ export function createStreamCache(options: StreamCacheOptions) {
     }
     sessions.set(key, session)
     return session
+  }
+
+  /**
+   * Adopt a file an external downloader finished (aria2c fills).
+   *
+   * The cache owns the entry format, so external writers publish through
+   * this seam: it validates the payload, writes the same sidecar the
+   * write-through path writes, brings the entry into the session map/LRU
+   * and reports whether the entry is now serveable. Refuses while an active
+   * writer (a tee session) owns the key — two writers must never share one
+   * payload file.
+   */
+  function publish(key: string, entry: { url: string; contentType: string; total: number }): boolean {
+    const live = sessions.get(key)
+    if (live && !live.done && !live.error) return false
+    const file = fileFor(key)
+    let size = 0
+    try {
+      const stat = fs.statSync(file)
+      if (!stat.isFile()) return false
+      size = stat.size
+    } catch {
+      return false
+    }
+    if (size <= 0) return false
+    try {
+      fs.writeFileSync(
+        metaFor(key),
+        JSON.stringify({
+          url: entry.url,
+          contentType: entry.contentType || 'application/octet-stream',
+          total: entry.total > 0 ? entry.total : size,
+          at: Date.now()
+        })
+      )
+    } catch {
+      return false
+    }
+    const session = resurrect(key)
+    if (session) {
+      session.done = true
+      session.error = null
+    }
+    evict()
+    return true
   }
 
   // ------------------------------------------------------------- eviction
@@ -293,7 +346,15 @@ export function createStreamCache(options: StreamCacheOptions) {
   }
 
   // ------------------------------------------------------------- public API
-  function open(url: string): StreamSession {
+  /**
+   * Open (or start) the cache entry for a URL.
+   *
+   * `keyHint` overrides the identity the entry is stored under. Signed
+   * CDN URLs rotate, so YouTube fills are keyed by video id (`yt:<id>`) —
+   * without the hint, the same track would miss its own cache entry the
+   * moment the URL is re-signed.
+   */
+  function open(url: string, opts?: { keyHint?: string }): StreamSession {
     const target = new URL(url) // throws on garbage
     if (target.protocol !== 'https:' && target.protocol !== 'http:') {
       throw new Error(`Unsupported stream scheme: ${target.protocol}`)
@@ -301,7 +362,7 @@ export function createStreamCache(options: StreamCacheOptions) {
     if (options.hostFilter && !options.hostFilter(target.hostname)) {
       throw new Error(`Stream host not allowed: ${target.hostname}`)
     }
-    const key = keyFor(target.toString())
+    const key = opts?.keyHint ? keyFor(opts.keyHint) : keyFor(target.toString())
     const existing = sessions.get(key)
     if (existing) {
       if (!existing.error) {
@@ -489,6 +550,7 @@ export function createStreamCache(options: StreamCacheOptions) {
     get,
     peek,
     read,
+    publish,
     wait,
     waitFirstByte,
     waitForTotal,

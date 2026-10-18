@@ -18,7 +18,7 @@ import { initMini, closeMiniWindow } from './mini'
 import { registerIpc, restoreSession, setBroadcast, filePathForTrack, trackForId, wireDownloads, currentUserSnapshot } from './ipc'
 import { stopPhoneServer } from './phoneServer'
 import { initStreamCache, getStreamCache, type StreamSession } from './streamCache'
-import { streamUrlFrom } from '../shared/streamUrl'
+import { streamRequestFrom } from '../shared/streamUrl'
 
 /**
  * A privileged custom scheme is registered BEFORE app ready.
@@ -165,7 +165,8 @@ app.whenReady().then(() => {
 
   // Preview / free-catalogue audio cache (write-through, LRU). Driven by
   // the renderer's spinity://stream/ requests; the host allowlist keeps the
-  // scheme from ever acting as a generic fetch proxy.
+  // scheme from ever acting as a generic fetch proxy. googlevideo is on the
+  // list for the YouTube stream cache (fill + replay by video-id key).
   initStreamCache({
     dir: path.join(app.getPath('userData'), 'stream-cache-v1'),
     hostFilter: (hostname) =>
@@ -173,7 +174,8 @@ app.whenReady().then(() => {
       /(^|\.)mzstatic\.com$/i.test(hostname) ||
       /(^|\.)itunes\.apple\.com$/i.test(hostname) ||
       /(^|\.)archive\.org$/i.test(hostname) ||
-      /(^|\.)somafm\.com$/i.test(hostname)
+      /(^|\.)somafm\.com$/i.test(hostname) ||
+      /(^|\.)googlevideo\.com$/i.test(hostname)
   })
 
   /**
@@ -346,17 +348,19 @@ app.whenReady().then(() => {
         }
       }
 
-      // Cache-backed free audio (preview clips, Internet Archive items):
-      // spinity://stream/?u=<encoded direct url>. The cache fetches once,
-      // serves the growing file to this response, and persists it for
-      // instant replays.
+      // Cache-backed audio (preview clips, Internet Archive items, cached
+      // YouTube streams): spinity://stream/?u=<encoded direct url>[&k=hint].
+      // The cache fetches once, serves the growing file to this response,
+      // and persists it for instant replays. The optional `k` hint is the
+      // stable identity (`yt:<videoId>`) — signed CDN URLs rotate, so a
+      // hinted request must find its entry by id, not by URL.
       if (url.hostname === 'stream') {
-        const target = streamUrlFrom(request.url)
+        const target = streamRequestFrom(request.url)
         if (!target) return new Response('Bad stream request', { status: 400 })
         const cache = getStreamCache()
         let session: StreamSession
         try {
-          session = cache.open(target)
+          session = cache.open(target.url, target.keyHint ? { keyHint: target.keyHint } : undefined)
         } catch (err) {
           return new Response(err instanceof Error ? err.message : 'Stream refused', { status: 403 })
         }

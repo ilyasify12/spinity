@@ -206,14 +206,14 @@ export const usePlayer = create<PlayerState>((set, get) => {
             webUrl: track.webUrl
           }
           void window.spinity.youtube
-            .stream(track.id)
+            .stream(track.id, { fill: true })
             .then((info) => {
               // The user may have skipped on while we resolved — only take
               // over if this track is still the one loaded.
               const s = get()
               if (s.queue[s.index]?.id !== track.id) return
               currentStreamResult = result
-              get().playStream(info.url, result)
+              get().playStream(info.streamUrl ?? info.url, result)
             })
             .catch(() => {
               const s = get()
@@ -439,12 +439,12 @@ export const usePlayer = create<PlayerState>((set, get) => {
             webUrl: track.webUrl
           }
           void window.spinity.youtube
-            .stream(track.id)
+            .stream(track.id, { fill: true, fresh: true })
             .then((info) => {
               const s = get()
               if (s.queue[s.index]?.id !== track.id) return
               currentStreamResult = result
-              get().playStream(info.url, result)
+              get().playStream(info.streamUrl ?? info.url, result)
             })
             .catch((err: unknown) => {
               const s = get()

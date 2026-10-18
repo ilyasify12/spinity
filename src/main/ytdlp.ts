@@ -3,6 +3,13 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { newId } from './auth'
+import {
+  INSTANT_CANDIDATE_TEMPLATE,
+  INSTANT_PRINT_TEMPLATE,
+  normalizeInstantQuery,
+  parseInstantCandidates,
+  parseInstantLine
+} from '../shared/instant'
 import type { AppSettings, DownloadJob, SearchResult, StreamInfo, ToolStatus } from '../shared/types'
 
 /**
@@ -28,6 +35,30 @@ const streamCache = new Map<string, { info: StreamInfo; at: number }>()
 const STREAM_TTL_MS = 3 * 60 * 60 * 1000
 /** One yt-dlp process per video id even when resolve calls overlap. */
 const resolveInflight = new Map<string, Promise<StreamInfo>>()
+/** Text search → winning video id; the URL itself still expires (3h memo). */
+const instantQueries = new Map<string, { videoId: string; title: string; at: number }>()
+const INSTANT_QUERY_TTL_MS = 24 * 60 * 60 * 1000
+const instantInflight = new Map<string, Promise<StreamInfo>>()
+
+/**
+ * Audio format ladder for streaming. m4a (AAC) and webm (Opus) both play
+ * natively in Chromium; the final fallback keeps things working if the
+ * first two formats are absent.
+ */
+const STREAM_FORMAT =
+  'bestaudio[protocol^=http][ext=m4a]/' +
+  'bestaudio[protocol^=http][ext=webm]/' +
+  'bestaudio[protocol^=http]/bestaudio'
+
+/** Shared flags for the two stream-resolving yt-dlp invocations. */
+const STREAM_COMMON_ARGS = [
+  '--no-playlist',
+  '--no-warnings',
+  '--socket-timeout',
+  '10',
+  '--retries',
+  '2'
+]
 
 export const isWin = process.platform === 'win32'
 export const isMac = process.platform === 'darwin'
@@ -211,11 +242,12 @@ function run(
   bin: string,
   args: string[],
   timeoutMs = 120_000,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  env?: NodeJS.ProcessEnv
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const MAX_OUT = 2_000_000
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { shell: false, windowsHide: true })
+    const child = spawn(bin, args, { shell: false, windowsHide: true, env })
     let stdout = ''
     let stderr = ''
     let done = false
@@ -265,7 +297,7 @@ function run(
 
 // ------------------------------------------------------------------ tools
 
-export async function getToolStatus(): Promise<ToolStatus> {
+export async function getToolStatus(): Promise<Omit<ToolStatus, 'aria2cPath' | 'aria2cVersion'>> {
   const ytdlpPath = resolveYtDlp()
   const ffmpegPath = resolveFfmpeg()
 
@@ -722,22 +754,25 @@ export const downloads = new DownloadManager()
  * a URL passed as a single argv element to `spawn` with `shell: false`, so no
  * shell interpretation is possible.
  */
-export async function resolveStreamUrl(videoId: string): Promise<StreamInfo> {
+export async function resolveStreamUrl(videoId: string, opts: { force?: boolean } = {}): Promise<StreamInfo> {
   // Hover-prewarm and the click can land on the same video — share one
   // process (and one cache entry) instead of racing two yt-dlp runs.
+  // `force` (re-resolve after a playback failure) gets its own slot so it
+  // can never be answered by the very memo it distrusts.
   const key = String(videoId)
-  const inflight = resolveInflight.get(key)
+  const inflightKey = opts.force ? `${key}#force` : key
+  const inflight = resolveInflight.get(inflightKey)
   if (inflight) return inflight
-  const p = resolveStreamUrlUncached(key)
-  resolveInflight.set(key, p)
+  const p = resolveStreamUrlUncached(key, opts.force === true)
+  resolveInflight.set(inflightKey, p)
   p.catch(() => {})
     .finally(() => {
-      if (resolveInflight.get(key) === p) resolveInflight.delete(key)
+      if (resolveInflight.get(inflightKey) === p) resolveInflight.delete(inflightKey)
     })
   return p
 }
 
-async function resolveStreamUrlUncached(videoId: string): Promise<StreamInfo> {
+async function resolveStreamUrlUncached(videoId: string, force: boolean): Promise<StreamInfo> {
   const bin = resolveYtDlp()
   if (!bin) throw new Error('yt-dlp was not found on this system')
 
@@ -748,11 +783,13 @@ async function resolveStreamUrlUncached(videoId: string): Promise<StreamInfo> {
 
   // Repeat plays resolve instantly — signed URLs live ~6h, we trust 3h.
   // True LRU: refresh recency on hit, evict oldest insertion without sorting.
-  const hit = streamCache.get(videoId)
-  if (hit && Date.now() - hit.at < STREAM_TTL_MS) {
-    streamCache.delete(videoId)
-    streamCache.set(videoId, hit)
-    return hit.info
+  if (!force) {
+    const hit = streamCache.get(videoId)
+    if (hit && Date.now() - hit.at < STREAM_TTL_MS) {
+      streamCache.delete(videoId)
+      streamCache.set(videoId, hit)
+      return hit.info
+    }
   }
   if (streamCache.size >= 200) {
     const oldest = streamCache.keys().next()
@@ -762,10 +799,7 @@ async function resolveStreamUrlUncached(videoId: string): Promise<StreamInfo> {
   const { stdout } = await run(
     bin,
     [
-      '--no-playlist',
-      '--no-warnings',
-      '--socket-timeout', '10',
-      '--retries', '2',
+      ...STREAM_COMMON_ARGS,
       // A JS runtime keeps the player challenge on yt-dlp's fast path.
       ...jsRuntimeArgs(),
       // NOTE (1.1.5): the android player fast-lane broke streams for some
@@ -773,11 +807,7 @@ async function resolveStreamUrlUncached(videoId: string): Promise<StreamInfo> {
       // selection — slower to resolve, but it plays everywhere 1.0.1 did.
       // The URL cache below keeps repeat plays instant regardless.
       '-f',
-      // m4a (AAC) and webm (Opus) both play natively in Chromium. The final
-      // fallback keeps things working if the first two formats are absent.
-      'bestaudio[protocol^=http][ext=m4a]/' +
-        'bestaudio[protocol^=http][ext=webm]/' +
-        'bestaudio[protocol^=http]/bestaudio',
+      STREAM_FORMAT,
       // One line: url|ext|protocol. Parsing this beats -g, which gives the URL
       // alone and no way to tell a playable progressive stream from a
       // manifest we cannot use.
@@ -800,6 +830,221 @@ async function resolveStreamUrlUncached(videoId: string): Promise<StreamInfo> {
   const info = { url, ext, protocol }
   streamCache.set(videoId, { info, at: Date.now() })
   return info
+}
+
+/**
+ * Resolve free text ("Artist - Track") straight to a stream URL, without a
+ * preceding search.
+ *
+ * Two passes, both measured live on yt-dlp 2026.08.19:
+ *
+ *  1. `ytsearch1:` + `--print` with the URL: one process does search AND
+ *     extraction (7–14 s cold, per query). This is the fast path.
+ *  2. Only when the top hit carries no playable audio: a flat `ytsearch5:`
+ *     (≈1–3 s — ids only, no extraction) lists candidates, and up to three
+ *     of them resolve through the proven id path, so one bad match cannot
+ *     fail the query.
+ *
+ * The winning id is fed into the id memo, so a later click on the same video
+ * (search result, queue, fallback) resolves instantly and shares one URL.
+ */
+export async function resolveStreamByQuery(query: string): Promise<StreamInfo> {
+  const q = normalizeInstantQuery(query)
+  if (q.length < 2) throw new Error('Search text is too short')
+  const key = q.toLowerCase()
+  const inflight = instantInflight.get(key)
+  if (inflight) return inflight
+  const p = resolveByQueryUncached(q, key)
+  instantInflight.set(key, p)
+  p.catch(() => {})
+    .finally(() => {
+      if (instantInflight.get(key) === p) instantInflight.delete(key)
+    })
+  return p
+}
+
+/** Remember a text query → winning video, so the same text never re-searches. */
+function rememberInstantQuery(key: string, videoId: string, title: string): void {
+  instantQueries.delete(key)
+  instantQueries.set(key, { videoId, title, at: Date.now() })
+  if (instantQueries.size > 200) {
+    const oldest = instantQueries.keys().next()
+    if (!oldest.done) instantQueries.delete(oldest.value)
+  }
+}
+
+async function resolveByQueryUncached(query: string, key: string): Promise<StreamInfo> {
+  const bin = resolveYtDlp()
+  if (!bin) throw new Error('yt-dlp was not found on this system')
+
+  // A remembered winner short-circuits the search; only the URL may be stale.
+  const known = instantQueries.get(key)
+  if (known && Date.now() - known.at < INSTANT_QUERY_TTL_MS) {
+    try {
+      const info = await resolveStreamUrl(known.videoId)
+      return { ...info, videoId: known.videoId, title: known.title }
+    } catch {
+      instantQueries.delete(key)
+    }
+  }
+
+  // Pass 1: search + extract + print, one process.
+  try {
+    const { stdout } = await run(
+      bin,
+      [
+        ...STREAM_COMMON_ARGS,
+        ...jsRuntimeArgs(),
+        '-f',
+        STREAM_FORMAT,
+        '--print',
+        INSTANT_PRINT_TEMPLATE,
+        `ytsearch1:${query}`
+      ],
+      45_000
+    )
+    const parsed = parseInstantLine(stdout)
+    if (parsed) {
+      const info = { url: parsed.url, ext: parsed.ext, protocol: parsed.protocol }
+      streamCache.set(parsed.videoId, { info, at: Date.now() })
+      rememberInstantQuery(key, parsed.videoId, parsed.title)
+      return { ...info, videoId: parsed.videoId, title: parsed.title }
+    }
+  } catch {
+    /* fall through to the candidate pass */
+  }
+
+  // Pass 2: flat candidate list, then the normal id resolver.
+  const { stdout } = await run(
+    bin,
+    [
+      '--no-warnings',
+      '--socket-timeout',
+      '10',
+      '--retries',
+      '2',
+      ...jsRuntimeArgs(),
+      '--flat-playlist',
+      '--print',
+      INSTANT_CANDIDATE_TEMPLATE,
+      `ytsearch5:${query}`
+    ],
+    30_000
+  )
+  let lastError = 'Could not resolve that search'
+  for (const candidateId of parseInstantCandidates(stdout).slice(0, 3)) {
+    try {
+      const info = await resolveStreamUrl(candidateId)
+      rememberInstantQuery(key, candidateId, '')
+      return { ...info, videoId: candidateId }
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err)
+    }
+  }
+  throw new Error(lastError)
+}
+
+// ---------------------------------------------------------- cache fills
+
+/**
+ * Download a track's bestaudio stream into a path the caller owns.
+ *
+ * This is the background-fill fallback for when a *direct* CDN fetch of a
+ * resolved URL is refused: some player clients (ios/visionos/android) sign
+ * URLs whose server rejects requests that do not look like the app that
+ * asked for them (live-measured: Chrome-UA GET terminated, 403). yt-dlp
+ * owns re-extraction, client choice and headers here, so the fill succeeds
+ * on every client family — and it is also the literal "aria2c as external
+ * downloader" wiring: when aria2c is present it is attached via
+ * `--downloader`, keeping the transfer multi-connection.
+ *
+ * The file lands as `<destBase>.<ext>` (the real container — the caller
+ * renames it into the cache's `<key>.bin`), leftovers (`.part`, `.ytdl`,
+ * `.aria2`) are cleaned up, and progress noise stays out of stdout.
+ */
+export async function downloadForCache(
+  videoId: string,
+  destBase: string,
+  opts: { aria2cPath?: string | null; timeoutMs?: number } = {}
+): Promise<{ file: string; ext: string; bytes: number }> {
+  const bin = resolveYtDlp()
+  if (!bin) throw new Error('yt-dlp was not found on this system')
+  if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) throw new Error('Invalid video id')
+
+  // Extending PATH is more portable than betting on yt-dlp's
+  // `--downloader name:path` form; the bare name + PATH is documented.
+  const aria2cDir = opts.aria2cPath ? path.dirname(opts.aria2cPath) : null
+  const downloaderArgs = aria2cDir
+    ? [
+        '--downloader',
+        'aria2c',
+        '--downloader-args',
+        'aria2c:-x 16 -s 16 -k 1M --no-conf=true --file-allocation=none'
+      ]
+    : []
+  const env = aria2cDir
+    ? { ...process.env, PATH: `${aria2cDir}${path.delimiter}${process.env.PATH ?? ''}` }
+    : undefined
+
+  const dirName = path.dirname(destBase)
+  const base = path.basename(destBase)
+  const sweepLeftovers = (): void => {
+    try {
+      for (const name of fs.readdirSync(dirName)) {
+        if (!name.startsWith(`${base}.`)) continue
+        if (/\.(part|ytdl|aria2|temp)$/i.test(name)) fs.rmSync(path.join(dirName, name), { force: true })
+      }
+    } catch {
+      /* best effort */
+    }
+  }
+
+  const result = await run(
+    bin,
+    [
+      ...STREAM_COMMON_ARGS,
+      ...jsRuntimeArgs(),
+      '-f',
+      STREAM_FORMAT,
+      '--no-progress',
+      '-o',
+      `${destBase}.%(ext)s`,
+      ...downloaderArgs,
+      `https://www.youtube.com/watch?v=${videoId}`
+    ],
+    opts.timeoutMs ?? 15 * 60_000,
+    undefined,
+    env
+  )
+  if (result.code !== 0) {
+    sweepLeftovers()
+    const tail = (result.stderr || result.stdout).trim().split('\n').pop()?.trim()
+    throw new Error(tail || `yt-dlp exited with code ${result.code}`)
+  }
+  sweepLeftovers()
+
+  let produced: string | null = null
+  try {
+    for (const name of fs.readdirSync(dirName)) {
+      if (!name.startsWith(`${base}.`)) continue
+      if (!produced) produced = path.join(dirName, name)
+    }
+  } catch {
+    /* fall through to the error below */
+  }
+  if (!produced) throw new Error('yt-dlp reported success but no file landed')
+  const ext = path.extname(produced).replace('.', '')
+  let bytes = 0
+  try {
+    bytes = fs.statSync(produced).size
+  } catch {
+    /* reported as empty below */
+  }
+  if (bytes <= 0) {
+    fs.rmSync(produced, { force: true })
+    throw new Error('yt-dlp produced an empty file')
+  }
+  return { file: produced, ext, bytes }
 }
 
 // ------------------------------------------------------- install / repair
