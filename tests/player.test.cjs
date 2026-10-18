@@ -5,7 +5,8 @@ const os = require('node:os')
 const path = require('node:path')
 const { buildSync } = require('esbuild')
 const out = fs.mkdtempSync(path.join(os.tmpdir(), 'spinity-player-test-'))
-buildSync({entryPoints:[path.join(__dirname,'../src/renderer/src/player/engine.ts')],bundle:true,platform:'node',format:'cjs',outfile:path.join(out,'engine.cjs')})
+// The renderer's @shared/* alias (electron.vite.config.ts) must exist here too.
+buildSync({entryPoints:[path.join(__dirname,'../src/renderer/src/player/engine.ts')],bundle:true,platform:'node',format:'cjs',alias:{'@shared':path.join(__dirname,'../src/shared')},outfile:path.join(out,'engine.cjs')})
 class AudioMock extends EventTarget {
   constructor(){super();global.audio=this;this.duration=120;this.currentTime=0;this.readyState=1;this.paused=true;this.seekable={length:1,start:()=>0,end:()=>8}}
   play(){this.paused=false;return Promise.resolve()}

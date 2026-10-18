@@ -46,6 +46,22 @@ export const IPC = {
   localRescan: 'local:rescan',
   localRemoveFolder: 'local:remove-folder',
 
+  // free music tier: previews (Deezer/Apple), open catalogues, radio
+  /** Search the free catalogues (metadata only; no account needed). */
+  freeSearch: 'free:search',
+  /** Start caching a streamable URL; resolves when the first bytes land. */
+  freePrewarm: 'free:prewarm',
+  /** Stream cache size + instant-start telemetry. */
+  freeStats: 'free:stats',
+  /** Drop the on-disk preview/catalogue cache. */
+  freeClearCache: 'free:clear-cache',
+  /** Renderer → main: measured time-to-first-audio for the loaded track. */
+  freeTtfa: 'free:report-ttfa',
+  /** List the public radio channels. */
+  freeRadio: 'free:radio',
+  /** Resolve a station playlist (.pls) to a direct stream URL. */
+  freeRadioResolve: 'free:radio-resolve',
+
   // settings + tools
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',

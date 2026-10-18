@@ -6,7 +6,7 @@ import { openContextMenu, playlistSubmenu, type MenuItem } from '../components/C
 import { IconDownload, IconExternal, IconPause, IconPlay } from '../components/Icons'
 import { createLibraryIndex, searchIndexed } from '../lib/search'
 import { t } from '../lib/i18n'
-import type { SearchResult, Track } from '@shared/types'
+import type { FreeHit, FreeProvider, SearchResult, Track } from '@shared/types'
 
 /**
  * Default fill for the page: a silent YouTube search issued on mount so the
@@ -15,6 +15,20 @@ import type { SearchResult, Track } from '@shared/types'
  */
 function popularQuery(): string {
   return useApp.getState().settings.language === 'ar' ? 'أغاني شائعة' : 'popular music'
+}
+
+/** Human label for a free-catalogue provider chip. */
+function providerLabel(provider: FreeProvider): string {
+  switch (provider) {
+    case 'deezer':
+      return 'Deezer'
+    case 'itunes':
+      return 'Apple'
+    case 'archive':
+      return 'Internet Archive'
+    default:
+      return 'Spotify'
+  }
 }
 
 /**
@@ -45,6 +59,14 @@ export function SearchPage(): React.JSX.Element {
   const tracks = useApp((s) => s.tracks)
   const jobs = useApp((s) => s.jobs)
   const notify = useApp((s) => s.notify)
+  const freeResults = useApp((s) => s.freeResults)
+  const freeQuery = useApp((s) => s.freeQuery)
+  const freeSearching = useApp((s) => s.freeSearching)
+  const searchFree = useApp((s) => s.searchFree)
+  const playFree = useApp((s) => s.playFree)
+  const radio = useApp((s) => s.radio)
+  const loadRadio = useApp((s) => s.loadRadio)
+  const playRadio = useApp((s) => s.playRadio)
 
   const [q, setQ] = useState(query)
   const current = useCurrentTrack()
@@ -70,7 +92,21 @@ export function SearchPage(): React.JSX.Element {
     void search(defaultQ, { silent: true })
   }, [q, searching, resultsQuery, defaultQ, search])
 
-  // Background YouTube search as the user types (debounced, silent, cached).
+  // Same default fill for the free catalogues (own session cache).
+  useEffect(() => {
+    if (q.trim() !== '') return
+    if (freeSearching || freeQuery === defaultQ) return
+    void searchFree(defaultQ, { silent: true })
+  }, [q, freeSearching, freeQuery, defaultQ, searchFree])
+
+  // Public radio channels: one silent fetch per session.
+  useEffect(() => {
+    void loadRadio()
+  }, [loadRadio])
+
+  // Background YouTube + free-catalogue search as the user types (debounced,
+  // silent, cached). The free tier fires in parallel so its section appears
+  // without delaying the YouTube list.
   useEffect(() => {
     const trimmed = q.trim()
     if (trimmed.length < 2 || trimmed === resultsQuery) return
@@ -78,9 +114,10 @@ export function SearchPage(): React.JSX.Element {
       setCommitted(trimmed)
       setSearchQuery(trimmed)
       void search(trimmed, { silent: true })
+      void searchFree(trimmed, { silent: true })
     }, 500)
     return () => window.clearTimeout(id)
-  }, [q, resultsQuery, search, setSearchQuery])
+  }, [q, resultsQuery, search, searchFree, setSearchQuery])
 
   const ownedIds = useMemo(() => new Set(tracks.map((track) => track.id)), [tracks])
   const likedSet = useMemo(() => new Set(likedIds), [likedIds])
@@ -116,6 +153,8 @@ export function SearchPage(): React.JSX.Element {
   const resultsLive = hasQuery && resultsQuery === trimmedQ
   const trendingLive = !hasQuery && resultsQuery === defaultQ
   const showSpinner = searching && (hasQuery ? resultsLive || resultsQuery === '' : trendingLive)
+  // Same for the free catalogues.
+  const freeShown = hasQuery ? freeQuery === trimmedQ : freeQuery === defaultQ
 
   function onSubmit(e: FormEvent): void {
     e.preventDefault()
@@ -124,6 +163,7 @@ export function SearchPage(): React.JSX.Element {
     setCommitted(trimmed)
     setSearchQuery(trimmed)
     void search(trimmed)
+    void searchFree(trimmed)
   }
 
   function playLocal(track: Track): void {
@@ -227,6 +267,82 @@ export function SearchPage(): React.JSX.Element {
     )
   }
 
+  /**
+   * Free-catalogue row: provider chip, play (preview/CC go through the
+   * write-through cache) and link-outs. Spotify rows carry no audio and open
+   * the real recording instead.
+   */
+  function renderFree(hit: FreeHit, i: number): React.JSX.Element {
+    const isActive = current?.id === hit.id && playing
+    const playable = Boolean(hit.audioUrl)
+    const handlePlay = (): void => {
+      if (isActive) stop()
+      else playFree(hit)
+    }
+    const alsoOn = hit.alsoOn?.length
+      ? ` · ${t('free.alsoOn', 'also on')} ${hit.alsoOn.map(providerLabel).join(', ')}`
+      : ''
+    return (
+      <TrackRow
+        key={hit.id}
+        index={i}
+        title={hit.title}
+        artist={[hit.artist, hit.album].filter(Boolean).join(' — ')}
+        thumbnail={hit.artwork}
+        durationSec={hit.durationSec}
+        playing={isActive}
+        onPlay={handlePlay}
+        actions={
+          <>
+            <span className="chip" title={`${providerLabel(hit.provider)}${alsoOn}`}>
+              {providerLabel(hit.provider)}
+              {hit.preview ? ` · ${t('free.previewChip', 'preview')}` : ''}
+            </span>
+            {playable ? (
+              <button
+                className={`btn btn-sm${isActive ? ' btn-danger' : ''}`}
+                onClick={handlePlay}
+                title={
+                  hit.preview
+                    ? t('free.tipPreview', 'Play the preview instantly — cached for replays')
+                    : t('free.tipFull', 'Play now — cached locally for instant replays')
+                }
+              >
+                {isActive ? <IconPause size={13} /> : <IconPlay size={13} />} {isActive ? t('ctx.stop', 'Stop') : t('ctx.play', 'Play')}
+              </button>
+            ) : (
+              <button
+                className="btn btn-sm"
+                onClick={() => void window.open(hit.spotifyUrl ?? hit.pageUrl ?? '', '_blank')}
+                title={t('free.tipSpotify', 'Open this recording on Spotify')}
+              >
+                <IconExternal size={13} /> {t('free.openSpotify', 'Open in Spotify')}
+              </button>
+            )}
+            {playable && hit.pageUrl && (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => void window.open(hit.pageUrl as string, '_blank')}
+                title={`${t('free.openProvider', 'Open on')} ${providerLabel(hit.provider)}${hit.license ? ` — ${hit.license}` : ''}`}
+              >
+                <IconExternal size={13} />
+              </button>
+            )}
+            {playable && hit.spotifyUrl && (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => void window.open(hit.spotifyUrl as string, '_blank')}
+                title={t('free.tipSpotify', 'Open this recording on Spotify')}
+              >
+                <IconExternal size={13} />
+              </button>
+            )}
+          </>
+        }
+      />
+    )
+  }
+
   return (
     <>
       <h1 className="page-title">{t('page.search', 'Search')}</h1>
@@ -301,6 +417,71 @@ export function SearchPage(): React.JSX.Element {
                     <button className="btn btn-sm" onClick={() => { if (isActive) stop(); else playLocal(track) }}>
                       {isActive ? <IconPause size={13} /> : <IconPlay size={13} />} {isActive ? t('ctx.stop', 'Stop') : t('ctx.play', 'Play')}
                     </button>
+                  }
+                />
+              )
+            })}
+          </div>
+        </section>
+      )}
+
+      {freeShown && (freeResults.length > 0 || freeSearching) && (
+        <section style={{ marginBottom: 24 }}>
+          <div className="sp-section-head">
+            <h2>{t('free.title', 'Free to play')}</h2>
+          </div>
+          <p className="hint" style={{ marginTop: -8, marginBottom: 12 }}>
+            {t(
+              'free.hint',
+              'Preview clips from Deezer and Apple, public-domain and Creative Commons tracks from the Internet Archive — streamed instantly and cached on this PC for replays. No account needed.'
+            )}
+          </p>
+          {freeResults.length > 0 && <div className="track-list">{freeResults.slice(0, 10).map(renderFree)}</div>}
+          {freeResults.length === 0 && freeSearching && (
+            <div className="empty">{t('free.lookingUp', 'Looking through the free catalogues…')}</div>
+          )}
+        </section>
+      )}
+
+      {!hasQuery && radio.length > 0 && (
+        <section style={{ marginBottom: 24 }}>
+          <div className="sp-section-head">
+            <h2>{t('radio.title', 'Live radio')}</h2>
+          </div>
+          <p className="hint" style={{ marginTop: -8, marginBottom: 12 }}>
+            {t('radio.hint', 'Always-on public stations (SomaFM) — tuned in instantly. Live streams are not cached; they never end.')}
+          </p>
+          <div className="track-list">
+            {radio.slice(0, 8).map((channel, i) => {
+              const radioId = `radio:${channel.id}`
+              const isActive = current?.id === radioId && playing
+              const handleTune = (): void => {
+                if (isActive) stop()
+                else void playRadio(channel)
+              }
+              return (
+                <TrackRow
+                  key={channel.id}
+                  index={i}
+                  title={channel.title}
+                  artist={channel.genre || t('radio.live', 'Live radio')}
+                  thumbnail={channel.image}
+                  durationSec={0}
+                  playing={isActive}
+                  onPlay={handleTune}
+                  actions={
+                    <>
+                      <span className="chip" title={channel.description}>
+                        {t('radio.liveChip', 'live')}
+                      </span>
+                      <button
+                        className={`btn btn-sm${isActive ? ' btn-danger' : ''}`}
+                        onClick={handleTune}
+                        title={t('radio.tip', 'Tune in — an always-on public stream')}
+                      >
+                        {isActive ? <IconPause size={13} /> : <IconPlay size={13} />} {isActive ? t('ctx.stop', 'Stop') : t('radio.tuneIn', 'Tune in')}
+                      </button>
+                    </>
                   }
                 />
               )

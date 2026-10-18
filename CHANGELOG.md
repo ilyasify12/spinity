@@ -1,20 +1,16 @@
 # Spinity Changelog
 
-## 1.3.1 — The right cover art, every time 🖼️
+## 1.4.0 — Free music, on tap 🎧
 
-**Local files finally show their own cover**
-- A local song now always shows the artwork embedded in the file. The app used to silently fall back to a YouTube thumbnail whenever it could not read the file's picture, so unrelated tracks could share someone else's cover.
-- The cover lookup now reports three answers instead of two: the file **has** artwork, the file **has none**, or the file **could not be read**. Only a confirmed "no picture" is allowed to borrow a YouTube cover, so a missing decoder can no longer masquerade as an absent picture.
-- `ffprobe` ships and is discovered properly. It is now copied alongside `ffmpeg` into the tools folder and located whether it sits in the same folder, in the downloaded package, or on `PATH`.
-- Artwork URLs carry a version segment, so a cover cached by an older build can never be served again after upgrading.
-
-**A new installer**
-- One click, one window. The wizard (directory page, install-mode page, license page, finish page) is gone — the installer opens a single dark window with the Spinity logo, a progress bar and a **Close** button.
-- **No UAC prompt.** The install is per-user, so nothing asks for administrator rights and the install can no longer fail with an elevation error. An old machine-wide install is detected and explained instead of leaving two copies behind.
-- Looking for a running copy of the app no longer depends on PowerShell, so the install and update no longer break where the execution policy is locked down.
-- Desktop and Start-menu shortcuts are rebuilt on every install, so a missing or stale one heals itself.
-
-## Unreleased
+**Free music tier: previews, public-domain catalogue and radio**
+- The Search page now has a **Free to play** section beside the YouTube results: 30-second licensed previews from **Deezer** and **Apple**, full-length public-domain and Creative Commons audio from the **Internet Archive** (the licence is linked on the row), and — when optional Spotify Web API keys are added in Settings — Spotify results that link out to the real recording.
+- A **Live radio** section lists the always-on SomaFM stations; the station's `.pls` playlist is resolved to a direct stream in the main process and tuned in with one click.
+- **Write-through stream cache.** Each cacheable stream is fetched once by the main process and teed to two consumers at once: the audio element reads the growing file while the bytes are still arriving, and the same bytes are persisted to disk — so the first audio arrives with the first network bytes and a replay is served locally in milliseconds.
+- Ranges stay honest: the protocol waits briefly for `Content-Length` so seeking gets real **206** responses, then serves any byte offset — including into the part that is still downloading.
+- Hardening: hosts are allow-listed to the known free catalogues, an idle watchdog aborts stalled downloads, crash leftovers (a payload without its completion sidecar) are cleaned on launch, and a soft **512 MB** LRU budget evicts the least recently used entries — never one that is being served right now.
+- **Telemetry you can see.** Settings → **Free music** shows the cache size and entry count, the average network first-byte time, and the measured **time to first audio** (last / average) reported by the engine for every play.
+- **No downloader, no extraction, no scraping.** Every playable URL is an official preview clip or a file published for free listening; the whole tier works with no account of any kind.
+- Tests: the cache is exercised against a local HTTP server (write-through, reads while downloading, failure + retry, stall watchdog, LRU, restart resurrection, byte-exact ranges), and every adapter parser runs on fixtures with an injected fetch, including the Spotify token exchange.
 
 **Two lyrics modes: Normal and AI writing**
 - New switch in the lyrics footer (also in **Settings → AI lyrics matching → Lyrics mode**): **Normal** behaves exactly as before (your upload → your `.lrc` file → the matched song), while **AI writing** lets the model write the lyrics for the song.
@@ -106,6 +102,20 @@
 - Keyboard shortcuts: `Space` play/pause, `Ctrl+←/→` previous/next, `Shift+←/→` seek 10s, `Ctrl+↑/↓` volume, `M` mute, `S` shuffle, `R` repeat, `F` like the current song, `L` lyrics, `Ctrl+K` search, `?` shortcut list, `Esc` close panels.
 - New **save to Liked Songs** button in the player bar, and a keyboard-shortcut button in the top bar.
 - The full shortcut list is discoverable in-app: press `?`, use the top-bar button, or see the new Settings → Keyboard shortcuts card.
+
+## 1.3.1 — The right cover art, every time 🖼️
+
+**Local files finally show their own cover**
+- A local song now always shows the artwork embedded in the file. The app used to silently fall back to a YouTube thumbnail whenever it could not read the file's picture, so unrelated tracks could share someone else's cover.
+- The cover lookup now reports three answers instead of two: the file **has** artwork, the file **has none**, or the file **could not be read**. Only a confirmed "no picture" is allowed to borrow a YouTube cover, so a missing decoder can no longer masquerade as an absent picture.
+- `ffprobe` ships and is discovered properly. It is now copied alongside `ffmpeg` into the tools folder and located whether it sits in the same folder, in the downloaded package, or on `PATH`.
+- Artwork URLs carry a version segment, so a cover cached by an older build can never be served again after upgrading.
+
+**A new installer**
+- One click, one window. The wizard (directory page, install-mode page, license page, finish page) is gone — the installer opens a single dark window with the Spinity logo, a progress bar and a **Close** button.
+- **No UAC prompt.** The install is per-user, so nothing asks for administrator rights and the install can no longer fail with an elevation error. An old machine-wide install is detected and explained instead of leaving two copies behind.
+- Looking for a running copy of the app no longer depends on PowerShell, so the install and update no longer break where the execution policy is locked down.
+- Desktop and Start-menu shortcuts are rebuilt on every install, so a missing or stale one heals itself.
 
 ## 1.3.0 — AURORA 🟠
 

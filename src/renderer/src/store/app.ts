@@ -3,11 +3,14 @@ import { restorePlayerSession, usePlayer } from '../player/engine'
 import { t } from '../lib/i18n'
 import { loadAccent, loadAvatarBg, saveAccent, saveAvatarBg } from '../lib/profile'
 import { normalizeText } from '../lib/search'
+import { streamUrlFor } from '@shared/streamUrl'
 import {
   DEFAULT_SETTINGS,
   type AppSettings,
   type DownloadJob,
+  type FreeHit,
   type Playlist,
+  type RadioChannel,
   type SearchResult,
   type Track,
   type User
@@ -60,6 +63,33 @@ function cachePut(key: string, results: SearchResult[]): void {
   }
 }
 
+/**
+ * Same idea for the free catalogues (Deezer / Apple / Internet Archive /
+ * Spotify): preview and catalogue results change slowly, so a 10-minute
+ * session cache keeps retyping and back-navigation instant.
+ */
+const freeCache = new Map<string, { at: number; hits: FreeHit[] }>()
+
+function freeCacheGet(key: string): FreeHit[] | undefined {
+  const hit = freeCache.get(key)
+  if (!hit) return undefined
+  if (Date.now() - hit.at > SEARCH_CACHE_TTL_MS) {
+    freeCache.delete(key)
+    return undefined
+  }
+  return hit.hits
+}
+
+function freeCachePut(key: string, hits: FreeHit[]): void {
+  freeCache.delete(key)
+  freeCache.set(key, { at: Date.now(), hits })
+  while (freeCache.size > SEARCH_CACHE_MAX) {
+    const oldest = freeCache.keys().next().value
+    if (oldest === undefined) break
+    freeCache.delete(oldest)
+  }
+}
+
 interface Toast {
   message: string
   kind: 'info' | 'error'
@@ -82,6 +112,13 @@ interface AppState {
   jobs: DownloadJob[]
   results: SearchResult[]
   searching: boolean
+  /** Free-catalogue hits (previews/CC/Spotify link-outs) for the same query. */
+  freeResults: FreeHit[]
+  freeSearching: boolean
+  /** Which query `freeResults` belongs to (mirrors resultsQuery). */
+  freeQuery: string
+  /** Public radio channels; loaded once per session. */
+  radio: RadioChannel[]
   /** Live Search-page query (shared so TopBar submissions fill the page input). */
   searchQuery: string
   /** Which query `results` belongs to — pages render them only when it matches. */
@@ -105,6 +142,14 @@ interface AppState {
   removeAvatar: () => Promise<void>
   setSearchQuery: (query: string) => void
   search: (query: string, opts?: { silent?: boolean }) => Promise<void>
+  /** Same query, free catalogues: previews, Internet Archive, Spotify links. */
+  searchFree: (query: string, opts?: { silent?: boolean }) => Promise<void>
+  /** Play a free hit (previews/CC queue through the write-through cache). */
+  playFree: (hit: FreeHit) => void
+  /** Fetch the radio channel list (idempotent; cached for the session). */
+  loadRadio: () => Promise<void>
+  /** Dial a live radio station (resolved through its .pls playlist). */
+  playRadio: (channel: RadioChannel) => Promise<void>
   /** Play a search result: local file if owned, else stream, else download. */
   playFromSearch: (result: SearchResult) => Promise<void>
   download: (result: SearchResult) => Promise<void>
@@ -136,6 +181,10 @@ export const useApp = create<AppState>((set, get) => ({
   jobs: [],
   results: [],
   searching: false,
+  freeResults: [],
+  freeSearching: false,
+  freeQuery: '',
+  radio: [],
   searchQuery: '',
   resultsQuery: '',
   startingId: null,
@@ -213,8 +262,13 @@ export const useApp = create<AppState>((set, get) => ({
       }
     })
 
-    // Streaming failure → fall back to downloading the same track.
+    // Streaming failure → fall back to downloading the same track. Free-tier
+    // streams (previews / radio) have no downloader behind them — just say so.
     usePlayer.getState().onStreamError((result) => {
+      if (result.source !== 'youtube') {
+        get().notify(t('toast.freeStreamFailed', 'That stream failed — try another result'), 'error')
+        return
+      }
       get().notify(t('toast.streamFailed', 'Streaming failed — downloading instead'), 'error')
       void get().download(result)
     })
@@ -267,7 +321,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   logout: async () => {
     await window.spinity.auth.logout()
-    set({ user: null, avatarBg: loadAvatarBg(null), tracks: [], playlists: [], likedIds: [], results: [], resultsQuery: '', searchQuery: '', jobs: [], searching: false })
+    set({ user: null, avatarBg: loadAvatarBg(null), tracks: [], playlists: [], likedIds: [], results: [], resultsQuery: '', searchQuery: '', jobs: [], searching: false, freeResults: [], freeQuery: '', freeSearching: false, radio: [] })
   },
 
   updateDisplayName: async (displayName) => {
@@ -341,6 +395,111 @@ export const useApp = create<AppState>((set, get) => ({
       }
       if (!silent) get().notify(errMessage(err), 'error')
       if (get().resultsQuery === trimmed) set({ results: [], searching: false })
+    }
+  },
+
+  /**
+   * Free catalogues, same query: Deezer/Apple previews, Internet Archive
+   * Creative Commons tracks, plus Spotify link-outs when credentials are
+   * configured. Runs alongside the YouTube search; silent by default so the
+   * section just appears when it has something to show.
+   */
+  searchFree: async (query, opts) => {
+    const silent = opts?.silent ?? false
+    const trimmed = query.trim()
+    if (!trimmed) {
+      set({ freeResults: [], freeQuery: '', freeSearching: false })
+      return
+    }
+    const key = normalizeText(trimmed)
+    const cached = freeCacheGet(key)
+    if (cached) {
+      set({ freeResults: cached, freeQuery: trimmed, freeSearching: false })
+      return
+    }
+    set({ freeSearching: true, freeQuery: trimmed })
+    try {
+      const hits = await window.spinity.free.search(trimmed, 14)
+      freeCachePut(key, hits)
+      if (get().freeQuery === trimmed) set({ freeResults: hits, freeSearching: false })
+    } catch (err) {
+      if (get().freeQuery === trimmed) set({ freeResults: [], freeSearching: false })
+      if (!silent) get().notify(errMessage(err), 'error')
+    }
+  },
+
+  /**
+   * Play a free hit.
+   *
+   * Every playable hit of the current list becomes the queue (previews flow
+   * into each other), and each entry wraps its provider URL in
+   * `spinity://stream/?u=…` so the main-process cache fetches it once and
+   * serves the growing file — first audio with the first network bytes, and
+   * replays straight from disk. Link-out-only hits (Spotify) open externally.
+   */
+  playFree: (hit) => {
+    if (!hit.audioUrl) {
+      const url = hit.spotifyUrl ?? hit.pageUrl
+      if (url) window.open(url, '_blank')
+      return
+    }
+    // Kick the cache immediately: playback then reads the same download.
+    try {
+      void window.spinity.free.prewarm(hit.audioUrl).catch(() => {})
+    } catch {}
+    const tracks: Track[] = get()
+      .freeResults.filter((h) => Boolean(h.audioUrl))
+      .map((h) => ({
+        id: h.id,
+        source: 'preview',
+        title: h.title,
+        artist: h.artist,
+        durationSec: h.durationSec,
+        thumbnail: h.artwork,
+        webUrl: h.pageUrl ?? '',
+        filePath: '',
+        downloadedAt: 0,
+        streamUrl: streamUrlFor(h.audioUrl as string),
+        license: h.license
+      }))
+    if (tracks.length === 0) return
+    const index = Math.max(
+      0,
+      tracks.findIndex((tk) => tk.id === hit.id)
+    )
+    usePlayer.getState().playQueue(tracks, index)
+  },
+
+  /** Radio channel list, fetched once per session. */
+  loadRadio: async () => {
+    if (get().radio.length > 0) return
+    try {
+      set({ radio: await window.spinity.free.radio() })
+    } catch {
+      /* offline — the section simply stays hidden */
+    }
+  },
+
+  /** Dial a live station: resolve its .pls, then play the direct stream. */
+  playRadio: async (channel) => {
+    try {
+      const url = await window.spinity.free.radioResolve(channel.plsUrl)
+      const track: Track = {
+        id: `radio:${channel.id}`,
+        source: 'radio',
+        title: channel.title,
+        artist: channel.genre ? `Live radio · ${channel.genre}` : t('radio.live', 'Live radio'),
+        durationSec: 0,
+        thumbnail: channel.image,
+        webUrl: `https://somafm.com/${channel.id}/`,
+        filePath: '',
+        downloadedAt: 0,
+        streamUrl: url
+      }
+      usePlayer.getState().playQueue([track], 0)
+      get().notify(`${channel.title} · ${t('radio.live', 'live radio')}`)
+    } catch (err) {
+      get().notify(errMessage(err), 'error')
     }
   },
 

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { streamUrlFrom } from '@shared/streamUrl'
 import type { SearchResult, Track } from '@shared/types'
 
 /**
@@ -44,6 +45,44 @@ function preloadTrack(track: Track | undefined): void {
   } catch {
     preloadedId = null
   }
+}
+
+/**
+ * Network-track warming for the queue: preview clips play from the same
+ * write-through cache the main process fills, so asking it to start the next
+ * track now means `next()`/`ended` starts from disk instead of the network.
+ * Radio URLs are plain https (not spinity://stream) and are skipped.
+ */
+function warmNextStream(track: Track | undefined): void {
+  if (!track?.streamUrl || track.filePath) return
+  const raw = streamUrlFrom(track.streamUrl)
+  if (!raw) return
+  try {
+    void window.spinity.free.prewarm(raw).catch(() => {})
+  } catch {}
+}
+
+/**
+ * Time-to-first-audio instrumentation. Armed at every load, settled by the
+ * first `playing` event after it — the delta is the number the Settings
+ * "Free music" panel reports. Pure telemetry: it can never affect playback.
+ */
+let ttfaFrom = 0
+let ttfaId: string | null = null
+let ttfaSettled = true
+function armTtfa(track: Track | undefined): void {
+  ttfaFrom = performance.now()
+  ttfaId = track?.id ?? null
+  ttfaSettled = false
+}
+function settleTtfa(track: Track | undefined): void {
+  if (ttfaSettled || !ttfaId) return
+  ttfaSettled = true
+  const ms = Math.max(0, Math.round(performance.now() - ttfaFrom))
+  const kind: 'local' | 'network' = track?.filePath ? 'local' : 'network'
+  try {
+    void window.spinity.free.reportTtfa(ms, kind).catch(() => {})
+  } catch {}
 }
 
 /** Volume/mute path: straight element knobs (no effects chain). */
@@ -119,7 +158,10 @@ interface PlayerState {
   setPeaks: (trackId: string, peaks: number[]) => void
 }
 
-const srcFor = (track: Track): string => `spinity://audio/${encodeURIComponent(track.id)}`
+const srcFor = (track: Track): string =>
+  !track.filePath && track.streamUrl
+    ? track.streamUrl
+    : `spinity://audio/${encodeURIComponent(track.id)}`
 
 /** Raw media failures translated into something actionable. */
 function friendlyPlayError(err: unknown, track: Track | undefined): string {
@@ -142,6 +184,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
     if (!track) return
     set({ loading: true, error: null, currentTime: 0, duration: track.durationSec || 0, streaming: false, peaks: [], peaksId: null })
     currentStreamResult = null
+    armTtfa(track)
     // Assigning src already resets position — an extra synchronous
     // `currentTime = 0` here forced a second seek round-trip through the
     // spinity:// protocol before metadata existed (part of the ~3s gap).
@@ -201,8 +244,12 @@ export const usePlayer = create<PlayerState>((set, get) => {
       // while this song plays so advancing starts in ms, not seconds.
       try {
         const s = get()
+        const current = s.index >= 0 ? s.queue[s.index] : undefined
+        settleTtfa(current)
         if (!s.shuffle && s.index >= 0 && s.index + 1 < s.queue.length) {
-          preloadTrack(s.queue[s.index + 1])
+          const next = s.queue[s.index + 1]
+          preloadTrack(next)
+          warmNextStream(next)
         }
       } catch {}
     })
@@ -230,7 +277,9 @@ export const usePlayer = create<PlayerState>((set, get) => {
       try {
         const s = usePlayer.getState()
         if (!s.shuffle && s.index >= 0 && s.index + 1 < s.queue.length) {
-          preloadTrack(s.queue[s.index + 1])
+          const next = s.queue[s.index + 1]
+          preloadTrack(next)
+          warmNextStream(next)
         }
       } catch {}
     })
@@ -251,7 +300,11 @@ export const usePlayer = create<PlayerState>((set, get) => {
         error: track
           ? track.source === 'local'
             ? `Cannot play "${track.title}" — the file may have been moved or deleted.`
-            : `Cannot play "${track.title}" — check your connection, or re-save it from Search.`
+            : track.source === 'preview'
+              ? `Cannot play "${track.title}" — the stream failed. Try again, or open it on its provider page.`
+              : track.source === 'radio'
+                ? `Lost "${track.title}" — live stations drop occasionally. Pick it again.`
+                : `Cannot play "${track.title}" — check your connection, or re-save it from Search.`
           : 'Playback error'
       })
       // A dying stream is recoverable: hand back the original search result so
@@ -321,6 +374,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
     playStream: (url, result) => {
       const placeholder: Track = { ...result, filePath: '', downloadedAt: 0 }
       currentStreamResult = result
+      armTtfa(placeholder)
       set({
         queue: [placeholder],
         index: 0,
@@ -371,8 +425,9 @@ export const usePlayer = create<PlayerState>((set, get) => {
           return
         }
         // Stream entry (liked/playlist placeholder): the signed URL probably
-        // expired — re-resolve once and take over if still current.
-        if (!track.filePath && track.webUrl) {
+        // expired — re-resolve once and take over if still current. Only
+        // YouTube has a resolver; other sources just fail with a message.
+        if (!track.filePath && track.webUrl && track.source === 'youtube') {
           set({ loading: true, error: null })
           const result: SearchResult = {
             id: track.id,

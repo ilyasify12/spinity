@@ -14,10 +14,16 @@ import { reconfigurePresence, updatePresence, type PresenceSnapshot } from './pr
 import { setFocusedConversation, testNotification } from './notify'
 import { toggleMiniWindow, pushMiniState, forwardMiniCmd } from './mini'
 import { phoneStatus, phoneQr, startPhoneServer, stopPhoneServer } from './phoneServer'
+import { fetchRadioChannels, resolveRadioStream, searchFree } from './freeMusic'
+import { getStreamCache } from './streamCache'
+import { streamUrlFor } from '../shared/streamUrl'
 import type {
   DownloadJob,
+  FreeHit,
+  FreeStats,
   LibrarySnapshot,
   Playlist,
+  RadioChannel,
   SearchResult,
   StreamInfo,
   Track,
@@ -410,6 +416,77 @@ export function registerIpc(): void {
     applyLoginItem()
     void reconfigurePresence()
     return next
+  })
+
+  // -------------------------------------------- free music + stream cache
+  // Previews (Deezer/Apple), Creative Commons catalogue (Internet Archive)
+  // and radio. All metadata-only: no downloaders, no extraction — every
+  // audioUrl is an official preview clip or a freely-published file.
+  let radioCache: { at: number; list: RadioChannel[] } | null = null
+
+  ipcMain.handle(IPC.freeSearch, async (_e, query: string, limit?: number): Promise<FreeHit[]> => {
+    requireUser()
+    const q = String(query ?? '').trim().slice(0, 200)
+    if (q.length < 2) return []
+    const settings = db.getSettings()
+    return searchFree({
+      query: q,
+      limit: Number.isFinite(limit) ? Math.min(Number(limit), 30) : 14,
+      providers: ['deezer', 'itunes', 'archive', 'spotify'],
+      spotify:
+        settings.spotifyClientId && settings.spotifyClientSecret
+          ? { clientId: settings.spotifyClientId, clientSecret: settings.spotifyClientSecret }
+          : null
+    })
+  })
+
+  ipcMain.handle(IPC.freePrewarm, async (_e, url: string) => {
+    requireUser()
+    const cache = getStreamCache()
+    const t0 = Date.now()
+    const target = String(url ?? '')
+    // Throws before any network I/O for bad schemes / disallowed hosts.
+    const session = cache.open(target)
+    if (!session.cached && !session.done && !session.error) {
+      // Best-effort: report as soon as the first bytes land (or fail fast).
+      await cache.waitFirstByte(session.key, 8_000).catch(() => false)
+    }
+    return { key: session.key, streamUrl: streamUrlFor(target), cached: session.cached, ms: Date.now() - t0 }
+  })
+
+  ipcMain.handle(IPC.freeStats, (): FreeStats => {
+    requireUser()
+    return getStreamCache().stats()
+  })
+
+  ipcMain.handle(IPC.freeClearCache, (): FreeStats => {
+    requireUser()
+    return getStreamCache().clear()
+  })
+
+  ipcMain.handle(IPC.freeTtfa, (_e, ms: number, kind: string) => {
+    if (!currentUser) return
+    const value = Number(ms)
+    if (!Number.isFinite(value) || value < 0 || value > 600_000) return
+    getStreamCache().recordPlay(Math.round(value), kind === 'network' ? 'network' : 'local')
+  })
+
+  ipcMain.handle(IPC.freeRadio, async (): Promise<RadioChannel[]> => {
+    requireUser()
+    if (radioCache && Date.now() - radioCache.at < 30 * 60 * 1000) return radioCache.list
+    try {
+      const list = await fetchRadioChannels(fetch)
+      radioCache = { at: Date.now(), list }
+      return list
+    } catch {
+      // Offline or the catalogue moved — the section simply stays empty.
+      return radioCache?.list ?? []
+    }
+  })
+
+  ipcMain.handle(IPC.freeRadioResolve, async (_e, plsUrl: string): Promise<string> => {
+    requireUser()
+    return resolveRadioStream(fetch, String(plsUrl ?? ''))
   })
 
   // -------------------------------------------------- discord rich presence

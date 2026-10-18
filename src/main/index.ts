@@ -17,6 +17,8 @@ import { initNotifier, notifyForSocialEvent } from './notify'
 import { initMini, closeMiniWindow } from './mini'
 import { registerIpc, restoreSession, setBroadcast, filePathForTrack, trackForId, wireDownloads, currentUserSnapshot } from './ipc'
 import { stopPhoneServer } from './phoneServer'
+import { initStreamCache, getStreamCache, type StreamSession } from './streamCache'
+import { streamUrlFrom } from '../shared/streamUrl'
 
 /**
  * A privileged custom scheme is registered BEFORE app ready.
@@ -160,6 +162,19 @@ app.whenReady().then(() => {
   const localArtwork = createArtworkLoader(path.join(app.getPath('userData'), 'artwork-cache-v3'))
   // Thumbnails borrowed from YouTube for local files with no embedded cover.
   const coverFallback = createCoverLookup(path.join(app.getPath('userData'), 'cover-cache-v2'))
+
+  // Preview / free-catalogue audio cache (write-through, LRU). Driven by
+  // the renderer's spinity://stream/ requests; the host allowlist keeps the
+  // scheme from ever acting as a generic fetch proxy.
+  initStreamCache({
+    dir: path.join(app.getPath('userData'), 'stream-cache-v1'),
+    hostFilter: (hostname) =>
+      /(^|\.)dzcdn\.net$/i.test(hostname) ||
+      /(^|\.)mzstatic\.com$/i.test(hostname) ||
+      /(^|\.)itunes\.apple\.com$/i.test(hostname) ||
+      /(^|\.)archive\.org$/i.test(hostname) ||
+      /(^|\.)somafm\.com$/i.test(hostname)
+  })
 
   /**
    * Artwork responses already resolved for this session, keyed by track id.
@@ -329,6 +344,70 @@ app.whenReady().then(() => {
           console.error('[protocol] image fetch failed', err)
           return new Response(null, { status: 502 })
         }
+      }
+
+      // Cache-backed free audio (preview clips, Internet Archive items):
+      // spinity://stream/?u=<encoded direct url>. The cache fetches once,
+      // serves the growing file to this response, and persists it for
+      // instant replays.
+      if (url.hostname === 'stream') {
+        const target = streamUrlFrom(request.url)
+        if (!target) return new Response('Bad stream request', { status: 400 })
+        const cache = getStreamCache()
+        let session: StreamSession
+        try {
+          session = cache.open(target)
+        } catch (err) {
+          return new Response(err instanceof Error ? err.message : 'Stream refused', { status: 403 })
+        }
+        // Chromium opens with `bytes=0-`; a truthful range response needs the
+        // Content-Length, so give the headers a short moment to arrive.
+        await cache.waitForTotal(session.key, 2500)
+        if (session.error) return new Response(`Stream failed: ${session.error}`, { status: 502 })
+
+        const total = session.total
+        const match = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get('range') ?? '')
+        let start = 0
+        let end: number | null = total > 0 ? total - 1 : null
+        let partial = false
+        if (match && total > 0) {
+          partial = true
+          if (match[1] === '') {
+            // bytes=-N means the final N bytes, not bytes 0 through N.
+            const suffix = Number(match[2])
+            start = suffix > 0 && Number.isSafeInteger(suffix) ? Math.max(0, total - suffix) : total
+          } else {
+            start = Number(match[1])
+            if (match[2] !== '') end = Number(match[2])
+          }
+          if (!Number.isSafeInteger(start) || end === null || !Number.isSafeInteger(end) || start > end || start >= total) {
+            return new Response('Range not satisfiable', {
+              status: 416,
+              headers: { 'Content-Range': `bytes */${total}` }
+            })
+          }
+        } else if (match) {
+          // Total unknown yet: answer 200 and start at the requested offset.
+          // (Later requests see the Content-Length and get real 206s.)
+          start = Math.max(0, Number(match[1]) || 0)
+        }
+        if (end !== null && total > 0) end = Math.min(end, total - 1)
+
+        const headers: Record<string, string> = {
+          'Content-Type': session.contentType || 'audio/mpeg',
+          'Cache-Control': 'no-store',
+          'Access-Control-Allow-Origin': '*'
+        }
+        if (total > 0) {
+          const last = end ?? total - 1
+          headers['Accept-Ranges'] = 'bytes'
+          headers['Content-Length'] = String(last - start + 1)
+          if (partial) headers['Content-Range'] = `bytes ${start}-${last}/${total}`
+        }
+        return new Response(cache.read(session.key, start, total > 0 ? (end ?? total - 1) : null), {
+          status: partial ? 206 : 200,
+          headers
+        })
       }
 
       if (url.hostname !== 'audio') {

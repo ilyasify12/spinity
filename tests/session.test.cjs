@@ -17,6 +17,8 @@ buildSync({
   bundle: true,
   platform: 'node',
   format: 'cjs',
+  // The renderer's @shared/* alias (electron.vite.config.ts) must exist here too.
+  alias: { '@shared': path.join(__dirname, '../src/shared') },
   outfile: path.join(out, 'engine.cjs')
 })
 

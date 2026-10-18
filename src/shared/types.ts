@@ -5,7 +5,7 @@
 
 import type { LyricSync } from './lyrics'
 
-export type TrackSource = 'youtube' | 'local'
+export type TrackSource = 'youtube' | 'local' | 'preview' | 'radio'
 
 /** A candidate track discovered via yt-dlp metadata (not yet on disk). */
 export interface SearchResult {
@@ -25,6 +25,14 @@ export interface Track extends SearchResult {
   downloadedAt: number
   /** Free-form licence note surfaced in the UI. */
   license?: string
+  /**
+   * Direct network stream for non-library sources (previews, radio).
+   *
+   * Library tracks always resolve through `spinity://audio/<id>`; these
+   * sources instead carry their own URL — previews use the cache-backed
+   * `spinity://stream/?u=…` wrapper, radio dials the station directly.
+   */
+  streamUrl?: string
 }
 
 export interface User {
@@ -98,6 +106,14 @@ export interface AppSettings {
    * Defaults to `normal`, so nothing changes until it is deliberately turned on.
    */
   lyricsMode: 'normal' | 'ai'
+  /**
+   * Spotify Web API credentials (client-credentials flow) for the free
+   * metadata tier: Spotify `/v1/search` results are shown as link-outs to the
+   * real recordings. Optional — previews from Deezer/Apple and the Internet
+   * Archive work with no account at all. Stored locally, like the AI key.
+   */
+  spotifyClientId: string
+  spotifyClientSecret: string
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -116,7 +132,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiLyrics: true,
   aiApiKey: '',
   aiModel: 'nvidia/nemotron-3.5-lightning-30b-a3b',
-  lyricsMode: 'normal'
+  lyricsMode: 'normal',
+  spotifyClientId: '',
+  spotifyClientSecret: ''
 }
 
 /**
@@ -129,6 +147,78 @@ export interface StreamInfo {
   url: string
   ext: string
   protocol: string
+}
+
+/** Which public catalogue a free-to-play hit came from. */
+export type FreeProvider = 'deezer' | 'itunes' | 'spotify' | 'archive'
+
+/**
+ * One searchable result from a free/public catalogue.
+ *
+ * - `deezer` / `itunes` — short preview clips (licensed, no account needed).
+ * - `archive` — full-length audio from the Internet Archive (public domain
+ *   or Creative Commons; the licence URL is surfaced in the UI).
+ * - `spotify` — metadata only, opened in the Spotify app/browser via
+ *   link-out. Present only when the user configured Web API credentials.
+ */
+export interface FreeHit {
+  /** `provider:externalId`, e.g. `deezer:3135556`. */
+  id: string
+  provider: FreeProvider
+  title: string
+  artist: string
+  album: string
+  durationSec: number
+  /** Remote artwork URL (https). */
+  artwork: string
+  /** Direct audio URL; absent for link-out-only hits (Spotify). */
+  audioUrl?: string
+  /** True when the audio is a short preview clip, not the full track. */
+  preview?: boolean
+  /** Provider page for the recording (attribution / open externally). */
+  pageUrl?: string
+  /** `open.spotify.com` link for the same recording, when known. */
+  spotifyUrl?: string
+  /** The same recording also exists on these other providers. */
+  alsoOn?: FreeProvider[]
+  /** Licence note (Internet Archive items). */
+  license?: string
+}
+
+/** One always-on radio station (SomaFM-style public streams). */
+export interface RadioChannel {
+  id: string
+  title: string
+  genre: string
+  description: string
+  image: string
+  /** Playlist (.pls) URL, resolved to a direct stream at play time. */
+  plsUrl: string
+}
+
+/**
+ * Stream-cache + instant-start telemetry, shown in Settings → Free music.
+ * Byte counts cover the on-disk preview/catalogue cache; the latency figures
+ * are rolling windows (last ~100 samples) kept in the main process.
+ */
+export interface FreeStats {
+  /** Completed cache entries on disk. */
+  entries: number
+  bytes: number
+  maxBytes: number
+  /** Downloads currently being written. */
+  inflight: number
+  /** Network latency to the first body byte, ms. */
+  firstByteLastMs: number | null
+  firstByteAvgMs: number | null
+  /** Time-to-first-audio measured by the renderer, ms. */
+  plays: number
+  playLastMs: number | null
+  playMinMs: number | null
+  playAvgMs: number | null
+  /** The same figures restricted to network-backed tracks. */
+  netPlays: number
+  netAvgMs: number | null
 }
 
 export type DownloadStatus = 'queued' | 'downloading' | 'converting' | 'done' | 'error' | 'canceled'

@@ -5,10 +5,13 @@ import type {
   AudioInfo,
   CachedPeaks,
   DownloadJob,
+  FreeHit,
+  FreeStats,
   LibrarySnapshot,
   LyricsResult,
   PhoneServerStatus,
   Playlist,
+  RadioChannel,
   SearchResult,
   StreamInfo,
   ToolStatus,
@@ -85,6 +88,32 @@ const api = {
     /** Forget a folder and its indexed tracks; files on disk are untouched. */
     removeFolder: (folder: string): Promise<void> =>
       ipcRenderer.invoke(IPC.localRemoveFolder, folder)
+  },
+
+  /**
+   * Free music tier: 30-second previews (Deezer / Apple), full-length
+   * Creative Commons and public-domain audio (Internet Archive) and public
+   * radio channels. Search needs no account; audio plays through the
+   * write-through stream cache, so replays are instant and offline.
+   */
+  free: {
+    /** Metadata search across the free catalogues; playable URLs included. */
+    search: (query: string, limit?: number): Promise<FreeHit[]> =>
+      ipcRenderer.invoke(IPC.freeSearch, query, limit),
+    /** Start caching a direct audio URL; resolves once the first bytes land. */
+    prewarm: (url: string): Promise<{ key: string; streamUrl: string; cached: boolean; ms: number }> =>
+      ipcRenderer.invoke(IPC.freePrewarm, url),
+    /** Cache size + instant-start telemetry (Settings → Free music). */
+    stats: (): Promise<FreeStats> => ipcRenderer.invoke(IPC.freeStats),
+    /** Drop the on-disk preview/catalogue cache. */
+    clearCache: (): Promise<FreeStats> => ipcRenderer.invoke(IPC.freeClearCache),
+    /** Report a measured time-to-first-audio (rolling window in main). */
+    reportTtfa: (ms: number, kind: 'local' | 'network'): Promise<void> =>
+      ipcRenderer.invoke(IPC.freeTtfa, ms, kind),
+    /** Always-on public radio channels. */
+    radio: (): Promise<RadioChannel[]> => ipcRenderer.invoke(IPC.freeRadio),
+    /** Resolve a station's .pls playlist to its direct stream URL. */
+    radioResolve: (plsUrl: string): Promise<string> => ipcRenderer.invoke(IPC.freeRadioResolve, plsUrl)
   },
 
   playlists: {

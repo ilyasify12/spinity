@@ -10,6 +10,15 @@ interface Note {
 /** Newest first. The modal shows every version newer than what was last seen. */
 const NOTES_BY_VERSION: { version: string; notes: Note[] }[] = [
   {
+    version: '1.4.0',
+    notes: [
+      { title: 'Free music, straight away', body: 'Search now also looks through Deezer and Apple previews and the Internet Archive\u2019s public-domain and Creative Commons catalogue \u2014 press play and it starts, no account and nothing to download. Add optional Spotify API keys in Settings and Spotify results link out to the real recording.' },
+      { title: 'Instant replays', body: 'Every preview is cached on your PC while it plays, so the second listen starts in milliseconds \u2014 Settings \u2192 Free music shows the cache size, the first-byte time and the measured time to first audio.' },
+      { title: 'Live radio', body: 'Always-on public stations (SomaFM) now sit on the Search page \u2014 tune in and it just plays. Stations never end, so they are streamed direct and not cached.' },
+      { title: 'Two ways to write lyrics', body: 'The lyrics panel has a Normal and an AI writing mode \u2014 your matched lyrics stay intact while the model writes its own version, and switching back is instant.' }
+    ]
+  },
+  {
     version: '1.3.1',
     notes: [
       { title: 'Your own cover art', body: 'Local songs now always show the picture embedded in the file. Previously, if the app couldn\u2019t read the file it would quietly borrow a YouTube thumbnail, so different tracks could end up sharing the same cover.' },

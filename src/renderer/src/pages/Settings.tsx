@@ -3,12 +3,18 @@ import { useApp } from '../store/app'
 import { IconFolder, IconRepeat, IconTrash } from '../components/Icons'
 import { t } from '../lib/i18n'
 import { SHORTCUTS } from '../lib/shortcuts'
-import type { AppSettings, PhoneServerStatus, ToolStatus } from '@shared/types'
+import type { AppSettings, FreeStats, PhoneServerStatus, ToolStatus } from '@shared/types'
 
 /** Last path segment of a folder, for a compact row title. */
 function folderName(folder: string): string {
   const trimmed = folder.replace(/[\\/]+$/, '')
   return trimmed.split(/[\\/]/).pop() || folder
+}
+
+/** Compact byte size for the stream-cache row. */
+function formatBytes(n: number): string {
+  if (n < 1024 * 1024) return `${Math.max(0, Math.round(n / 1024))} KB`
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /** Legacy copy path for when the async clipboard API is unavailable. */
@@ -171,6 +177,65 @@ export function SettingsPage(): React.JSX.Element {
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Could not clear', 'error')
     }
+  }
+
+  // Free music tier: stream-cache size/telemetry + optional Spotify Web API
+  // credentials (client-credentials flow; previews need no account at all).
+  const [freeStats, setFreeStats] = useState<FreeStats | null>(null)
+  const [freeBusy, setFreeBusy] = useState(false)
+  const [spotifyIdDraft, setSpotifyIdDraft] = useState('')
+  const [spotifySecretDraft, setSpotifySecretDraft] = useState('')
+
+  useEffect(() => {
+    setSpotifyIdDraft(settings.spotifyClientId)
+    setSpotifySecretDraft(settings.spotifyClientSecret)
+  }, [settings.spotifyClientId, settings.spotifyClientSecret])
+
+  useEffect(() => {
+    let alive = true
+    void window.spinity.free
+      .stats()
+      .then((st) => {
+        if (alive) setFreeStats(st)
+      })
+      .catch(() => {
+        /* main not ready yet */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  async function refreshFreeStats(): Promise<void> {
+    try {
+      setFreeStats(await window.spinity.free.stats())
+    } catch {
+      /* keep the last known numbers */
+    }
+  }
+
+  async function clearFreeCache(): Promise<void> {
+    setFreeBusy(true)
+    try {
+      setFreeStats(await window.spinity.free.clearCache())
+      notify(t('settings.freeCacheCleared', 'Preview cache cleared — clips re-download on the next play'))
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Could not clear the cache', 'error')
+    } finally {
+      setFreeBusy(false)
+    }
+  }
+
+  async function saveSpotifyCredentials(): Promise<void> {
+    const id = spotifyIdDraft.trim()
+    const secret = spotifySecretDraft.trim()
+    if (id === settings.spotifyClientId && secret === settings.spotifyClientSecret) return
+    await updateSettings({ spotifyClientId: id, spotifyClientSecret: secret })
+    notify(
+      id && secret
+        ? t('settings.spotifySaved', 'Spotify credentials saved — Spotify results appear in Search')
+        : t('settings.spotifyCleared', 'Spotify credentials removed')
+    )
   }
 
   async function refresh(): Promise<void> {
@@ -760,6 +825,91 @@ export function SettingsPage(): React.JSX.Element {
           >
             <IconRepeat size={14} /> {rescanning ? 'Rescanning…' : 'Rescan all'}
           </button>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 20 }}>
+        <h2 style={{ margin: '0 0 6px', fontSize: 16 }}>{t('settings.free', 'Free music')}</h2>
+        <p className="hint" style={{ marginTop: 0 }}>
+          {t(
+            'settings.freeHint',
+            'Search plays 30-second previews (Deezer, Apple) and full public-domain / Creative Commons tracks (Internet Archive) with no account. Every stream is cached on this PC while it plays, so replays start instantly. Live radio tunes in directly and is never cached.'
+          )}
+        </p>
+
+        <div className="pl-row" style={{ paddingLeft: 0 }}>
+          <span className={`chip${freeStats && freeStats.entries > 0 ? ' chip-ok' : ''}`}>
+            {freeStats ? `${freeStats.entries} ${t('settings.freeCached', 'cached')}` : '…'}
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="track-title">
+              {freeStats ? `${formatBytes(freeStats.bytes)} / ${formatBytes(freeStats.maxBytes)}` : '—'}
+            </div>
+            <div className="track-artist">
+              {freeStats
+                ? [
+                    freeStats.firstByteAvgMs !== null
+                      ? `${t('settings.freeFirstByte', 'first byte')}: ${freeStats.firstByteAvgMs} ms`
+                      : null,
+                    freeStats.playLastMs !== null
+                      ? `${t('settings.freeTtfa', 'time to first audio')}: ${freeStats.playLastMs} ms ${t('settings.freeLast', '(last)')} · ${freeStats.playAvgMs} ms ${t('settings.freeAvg', 'avg')}`
+                      : null,
+                    freeStats.inflight > 0 ? `${freeStats.inflight} ${t('settings.freeInflight', 'downloading')}` : null
+                  ]
+                    .filter(Boolean)
+                    .join(' · ') || t('settings.freeNoTelemetry', 'Play a preview to see instant-start timings here.')
+                : t('settings.freeLoading', 'Reading cache…')}
+            </div>
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={() => void refreshFreeStats()}>
+            <IconRepeat size={14} /> {t('settings.freeRefresh', 'Refresh')}
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => void clearFreeCache()}
+            disabled={freeBusy || (freeStats?.entries ?? 0) === 0}
+            title={t('settings.freeClearHint', 'Deletes cached previews; they re-download on the next play')}
+          >
+            <IconTrash size={14} /> {freeBusy ? t('settings.freeClearing', 'Clearing…') : t('settings.freeClear', 'Clear cache')}
+          </button>
+        </div>
+
+        <div className="field" style={{ marginTop: 12 }}>
+          <label htmlFor="spotifyId">{t('settings.spotifyId', 'Spotify client ID (optional)')}</label>
+          <input
+            id="spotifyId"
+            value={spotifyIdDraft}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder="e.g. 4f3a…"
+            onChange={(e) => setSpotifyIdDraft(e.target.value)}
+            onBlur={() => void saveSpotifyCredentials()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void saveSpotifyCredentials()
+            }}
+          />
+        </div>
+        <div className="field" style={{ marginBottom: 0 }}>
+          <label htmlFor="spotifySecret">{t('settings.spotifySecret', 'Spotify client secret')}</label>
+          <input
+            id="spotifySecret"
+            type="password"
+            value={spotifySecretDraft}
+            spellCheck={false}
+            autoComplete="off"
+            placeholder="…"
+            onChange={(e) => setSpotifySecretDraft(e.target.value)}
+            onBlur={() => void saveSpotifyCredentials()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void saveSpotifyCredentials()
+            }}
+          />
+          <span className="hint">
+            {t(
+              'settings.spotifyHint',
+              'Both fields enable Spotify results in Search (metadata plus a link out to the real recording) through the free Web API. Create an app at developer.spotify.com — the credentials stay on this PC, like the AI key.'
+            )}
+          </span>
         </div>
       </div>
 
